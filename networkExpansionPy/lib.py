@@ -145,6 +145,58 @@ def _load_tuple_network(tlist):
             rows.append({"rn":i, "cid":cid, "s":1})
     return pd.DataFrame(rows)
 
+def _duplicate_reactions(rdict):
+    """
+    Check rdict to see if there are unique rids that have identical (or mirrored) 
+    products/reactants
+    """
+
+    reverse_rdict = dict()
+    for k,v in rdict.items():
+        
+        newv = (frozenset(v[0]),frozenset(v[1]))
+        newv_mirror = (frozenset(v[1]),frozenset(v[0]))
+
+        ## Check for identical match w/other reactants/products
+        if newv in reverse_rdict:
+            reverse_rdict[newv].add(k)
+
+        ## Check for mirrored match w/other reactants/products
+        elif newv_mirror in reverse_rdict:
+            reverse_rdict[newv].add(k)
+        
+        else:
+            reverse_rdict[newv] = {k}
+
+    return [v for k,v in reverse_rdict if len(v)>1]    
+
+def _load_dict_network(rdict):
+    """
+    Load a simple network, defined by dict of reaction_ID:(reactant_list, product_list)
+    
+    Note: Intended for DEV only
+    Note: Stoichiometry information in output is only accurate for directionality
+    
+        rdict_example = [
+             2:(["A","B"],["C"]),
+             13:(["C","D"],["E","F"]),
+             14:(["E","F"],["G"]),
+             77:(["G","H"],["I"]),
+             103:(["A","J"],["I"])]
+    """
+    duplicate_reactions = _duplicate_reactions(rdict):
+    if len(duplicate_reactions)>0:
+        raise Warning("Duplicate reactions found: {}".format(duplicate_reactions))
+
+    rows = list()
+    for k,d in rdict.items():
+        if len(d)!=2: raise ValueError("reactions must be two-tuples")
+        for cid in d[0]:
+            rows.append({"rn":k, "cid":cid, "s":-1})
+        for cid in d[1]:
+            rows.append({"rn":k, "cid":cid, "s":1})
+    return pd.DataFrame(rows)
+
 class GlobalMetabolicNetwork:
     
     def __init__(self,metabolism="KEGG_OG"):
