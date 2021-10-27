@@ -285,3 +285,73 @@ class TestGlobalMetabolicNetworkExpand(unittest.TestCase):
 
         self.assertEqual(compounds,expected_compounds)
         self.assertEqual(reactions,expected_reactions)
+
+class TestLoadDictNetwork(unittest.TestCase):
+
+    def test_load_rdict(self):
+
+        rxns = {
+                2:(["A","B"],["C"]),
+                13:(["C","D"],["E","F"]),
+                14:(["E","F"],["G"]),
+                77:(["G","H"],["I"]),
+                103:(["A","J"],["I"])}
+
+        expected_df = pd.DataFrame(
+            [{'rn': 2, 'cid': 'A', 's': -1},
+            {'rn': 2, 'cid': 'B', 's': -1},
+            {'rn': 2, 'cid': 'C', 's': 1},
+            {'rn': 13, 'cid': 'C', 's': -1},
+            {'rn': 13, 'cid': 'D', 's': -1},
+            {'rn': 13, 'cid': 'E', 's': 1},
+            {'rn': 13, 'cid': 'F', 's': 1},
+            {'rn': 14, 'cid': 'E', 's': -1},
+            {'rn': 14, 'cid': 'F', 's': -1},
+            {'rn': 14, 'cid': 'G', 's': 1},
+            {'rn': 77, 'cid': 'G', 's': -1},
+            {'rn': 77, 'cid': 'H', 's': -1},
+            {'rn': 77, 'cid': 'I', 's': 1},
+            {'rn': 103, 'cid': 'A', 's': -1},
+            {'rn': 103, 'cid': 'J', 's': -1},
+            {'rn': 103, 'cid': 'I', 's': 1}])
+
+        self.assertTrue(dfs_have_equal_content(ne._load_dict_network(rxns),expected_df))
+
+class TestDuplicateReactionsNetwork(unittest.TestCase):
+
+    def test_duplicate_exact(self):
+
+        rxns = {
+                2:(["A","B"],["C"]),
+                13:(["C","D"],["E","F"]),
+                14:(["E","F"],["G"]),
+                77:(["G","H"],["I"]),
+                103:(["A","J"],["I"]),
+                104:(["A","B"],["C"])}
+
+        self.assertEqual(ne._duplicate_reactions(rxns),[{2,104}])
+
+    def test_duplicate_mirror(self):
+
+        rxns = {
+                2:(["A","B"],["C"]),
+                13:(["C","D"],["E","F"]),
+                14:(["E","F"],["G"]),
+                77:(["G","H"],["I"]),
+                103:(["A","J"],["I"]),
+                105:(["C"],["A","B"])}
+
+        self.assertEqual(ne._duplicate_reactions(rxns),[{2,105}])
+
+    def test_duplicate_both(self):
+
+        rxns = {
+                2:(["A","B"],["C"]),
+                13:(["C","D"],["E","F"]),
+                14:(["E","F"],["G"]),
+                77:(["G","H"],["I"]),
+                103:(["A","J"],["I"]),
+                104:(["A","B"],["C"]),
+                105:(["C"],["A","B"])}
+
+        self.assertEqual(ne._duplicate_reactions(rxns),[{2,104,105}])
