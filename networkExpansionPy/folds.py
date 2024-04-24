@@ -8,6 +8,7 @@ import random
 import pickle
 import gzip
 import re
+from collections import defaultdict
 
 asset_path = PurePath(__file__).parent / "assets"
 
@@ -855,6 +856,8 @@ class FoldMetabolism:
         Returns:
             A `Result` object that stores the results of the rule/fold ordering algorithm.
         """
+        print("Modified reaction iteration dict")
+
         ## Place to store results and current state of expansion
         ## ITERATION 0 (Avoid updating folds on the 0th iteration since they don't apply until iteration=1)
         result = Result(self.scope)
