@@ -502,7 +502,14 @@ class FoldMetabolism:
         rn_tup_set = set(self.m.rxns2tuple(possible_rules.rns | self.seed.rns))
         if fold_algorithm=="trace":
             compound_iteration_dict, reaction_iteration_dict = self.m.expand(current_cpds | self.seed.cpds, algorithm=fold_algorithm, reaction_mask=rn_tup_set)
-            return compound_iteration_dict, {k[0]:v for k,v in reaction_iteration_dict.items()}#set(cx), set([i[0] for i in rx])
+            
+            reaction_iteration_dict_no_direction = defaultdict(set)
+            for k,v in reaction_iteration_dict.items():
+                reaction_iteration_dict_no_direction[k[0]].add(v)
+            reaction_iteration_dict_new = {k:min(v) for k,v in reaction_iteration_dict_no_direction.items()} # make sure to only count the first iteration where a reaction gets added
+            
+            return compound_iteration_dict, reaction_iteration_dict_new#set(cx), set([i[0] for i in rx])
+        
         elif fold_algorithm=="step":
             cx,rx = self.m.expand(current_cpds | self.seed.cpds, algorithm=fold_algorithm, reaction_mask=rn_tup_set)
             return set(cx), set([i[0] for i in rx])
