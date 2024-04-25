@@ -847,12 +847,13 @@ class FoldMetabolism:
         rule_iteration_dict = {}
         rns_through_ri = dict()
         for ri in sorted(set(current.rn_iteration_dict.values())):
+            rns_through_ri[ri] = []
             for k,v in current.rn_iteration_dict.items():
                 if v<=ri:
                     rns_through_ri[ri].append(k)
-            for r in self.scope.rules.subset_from_folds(current.folds).subset_from_rns(rns_through_ri[ri]):
-                if r not in rule_iteration_dict:
-                    rule_iteration_dict[r] = ri
+            for rule in self.scope.rules.subset_from_folds(current.folds).subset_from_rns(set(rns_through_ri[ri])):
+                if rule.id not in rule_iteration_dict:
+                    rule_iteration_dict[rule.id] = ri
         return rule_iteration_dict
 
     def rule_order(
