@@ -101,7 +101,7 @@ def netExp_masked_batch_rs(R, P, x, b, masks):
 
     return x_out, y_out
 
-def netContract_rs(R, P, y_active, y_extinct):
+def netContract_rs(R, P, x_active, y_active, y_extinct):
     """Rust wrapper for network contraction."""
     R_T = R.T.tocsr()
     P = P.tocsr()
@@ -115,10 +115,30 @@ def netContract_rs(R, P, y_active, y_extinct):
         P.indices.astype(np.int32),
         P.indptr.astype(np.int32),
         P.shape[0],
+        np.asarray(x_active.toarray()).ravel().astype(np.uint8),
         np.asarray(y_active.toarray()).ravel().astype(np.uint8),
         np.asarray(y_extinct.toarray()).ravel().astype(np.uint8),
     )
+    return x_out, y_out
 
+def netContract_batch_rs(R, P, x_active, y_active, y_extinct_batch):
+    """Rust wrapper for batch network contraction."""
+    R_T = R.T.tocsr()
+    P = P.tocsr()
+
+    x_out, y_out = netexprs.contract_batch(
+        R_T.data.astype(np.float64),
+        R_T.indices.astype(np.int32),
+        R_T.indptr.astype(np.int32),
+        R_T.shape[0],
+        P.data.astype(np.float64),
+        P.indices.astype(np.int32),
+        P.indptr.astype(np.int32),
+        P.shape[0],
+        np.asarray(x_active.toarray()).ravel().astype(np.uint8),
+        np.asarray(y_active.toarray()).ravel().astype(np.uint8),
+        y_extinct_batch.astype(np.uint8),
+    )
     return x_out, y_out
 
 class TestExpandParity(unittest.TestCase):
@@ -403,7 +423,7 @@ class TestContractParity(unittest.TestCase):
         y_py = Yac_py[-1]
 
         # Rust contraction
-        x_rs, y_rs = netContract_rs(R, P, y_expanded, y_extinct)
+        x_rs, y_rs = netContract_rs(R, P, x_expanded, y_expanded, y_extinct)
 
         np.testing.assert_array_equal(x_rs, x_py.toarray().ravel())
         np.testing.assert_array_equal(y_rs, y_py.toarray().ravel())
@@ -435,7 +455,7 @@ class TestContractParity(unittest.TestCase):
         x_py = Xac_py[-1]
         y_py = Yac_py[-1]
 
-        x_rs, y_rs = netContract_rs(R, P, y_expanded, y_extinct)
+        x_rs, y_rs = netContract_rs(R, P, x_expanded, y_expanded, y_extinct)
 
         np.testing.assert_array_equal(x_rs, x_py.toarray().ravel())
         np.testing.assert_array_equal(y_rs, y_py.toarray().ravel())
@@ -464,7 +484,7 @@ class TestContractParity(unittest.TestCase):
         x_py = Xac_py[-1]
         y_py = Yac_py[-1]
 
-        x_rs, y_rs = netContract_rs(R, P, y_expanded, y_extinct)
+        x_rs, y_rs = netContract_rs(R, P, x_expanded, y_expanded, y_extinct)
 
         np.testing.assert_array_equal(x_rs, x_py.toarray().ravel())
         np.testing.assert_array_equal(y_rs, y_py.toarray().ravel())
@@ -492,7 +512,7 @@ class TestContractLargeNetwork(unittest.TestCase):
         x_py = Xac_py[-1]
         y_py = Yac_py[-1]
 
-        x_rs, y_rs = netContract_rs(R, P, y_expanded, y_extinct)
+        x_rs, y_rs = netContract_rs(R, P, x_expanded, y_expanded, y_extinct)
 
         np.testing.assert_array_equal(x_rs, x_py.toarray().ravel())
         np.testing.assert_array_equal(y_rs, y_py.toarray().ravel())
@@ -512,10 +532,141 @@ class TestContractLargeNetwork(unittest.TestCase):
         x_py = Xac_py[-1]
         y_py = Yac_py[-1]
 
-        x_rs, y_rs = netContract_rs(R, P, y_expanded, y_extinct)
+        x_rs, y_rs = netContract_rs(R, P, x_expanded, y_expanded, y_extinct)
 
         np.testing.assert_array_equal(x_rs, x_py.toarray().ravel())
         np.testing.assert_array_equal(y_rs, y_py.toarray().ravel())
+
+class TestContractBatchParity(unittest.TestCase):
+
+    def test_toy_contract_batch(self):
+        """Batch contraction on toy network."""
+        toy = ne.GlobalMetabolicNetwork("dev")
+        rxns = [
+            (["A", "B"], ["C"]),
+            (["C", "D"], ["E", "F"]),
+            (["E", "F"], ["G"]),
+            (["G", "H"], ["I"]),
+            (["A", "J"], ["I"]),
+        ]
+        toy.network = ne._load_tuple_network(rxns)
+        toy.convertToIrreversible()
+
+        R, P, x0, b = rpxb(toy, ["A", "B", "D", "H"])
+
+        x_expanded, y_expanded = ne.netExp(R, P, x0, b)
+
+        n_reactions = R.shape[1]
+        np.random.seed(42)
+        n_batches = 5
+        y_extinct_batch = (np.random.random((n_batches, n_reactions)) < 0.3).astype(np.uint8)
+
+        x_batch, y_batch = netContract_batch_rs(R, P, x_expanded, y_expanded, y_extinct_batch)
+
+        for i in range(n_batches):
+            y_extinct = csr_matrix(y_extinct_batch[i]).T
+            Xac_py, Yac_py = ne.netContract(R, P, b, x_expanded, y_expanded, y_extinct)
+            x_py = Xac_py[-1]
+            y_py = Yac_py[-1]
+
+            np.testing.assert_array_equal(x_batch[i], x_py.toarray().ravel())
+            np.testing.assert_array_equal(y_batch[i], y_py.toarray().ravel())
+
+    def test_toy_contract_batch_varying_extinction(self):
+        """Batch contraction with varying extinction rates."""
+        toy = ne.GlobalMetabolicNetwork("dev")
+        rxns = [
+            (["A", "B"], ["C"]),
+            (["C", "D"], ["E", "F"]),
+            (["E", "F"], ["G"]),
+            (["G", "H"], ["I"]),
+            (["A", "J"], ["I"]),
+        ]
+        toy.network = ne._load_tuple_network(rxns)
+        toy.convertToIrreversible()
+
+        R, P, x0, b = rpxb(toy, ["A", "B", "D", "H"])
+
+        x_expanded, y_expanded = ne.netExp(R, P, x0, b)
+
+        n_reactions = R.shape[1]
+        np.random.seed(123)
+
+        # Different extinction rates per batch
+        y_extinct_batch = np.vstack([
+            (np.random.random(n_reactions) < 0.1).astype(np.uint8),
+            (np.random.random(n_reactions) < 0.3).astype(np.uint8),
+            (np.random.random(n_reactions) < 0.5).astype(np.uint8),
+            np.zeros(n_reactions, dtype=np.uint8),
+            np.ones(n_reactions, dtype=np.uint8),
+        ])
+
+        x_batch, y_batch = netContract_batch_rs(R, P, x_expanded, y_expanded, y_extinct_batch)
+
+        for i in range(y_extinct_batch.shape[0]):
+            y_extinct = csr_matrix(y_extinct_batch[i]).T
+            Xac_py, Yac_py = ne.netContract(R, P, b, x_expanded, y_expanded, y_extinct)
+            x_py = Xac_py[-1]
+            y_py = Yac_py[-1]
+            
+            print(f"Batch {i}: extinct_sum={y_extinct_batch[i].sum()}")
+            print(f"  x_rs: {x_batch[i].sum()}, x_py: {x_py.toarray().sum()}")
+            print(f"  y_rs: {y_batch[i].sum()}, y_py: {y_py.toarray().sum()}")
+
+            np.testing.assert_array_equal(x_batch[i], x_py.toarray().ravel())
+            np.testing.assert_array_equal(y_batch[i], y_py.toarray().ravel())
+
+
+class TestContractBatchLargeNetwork(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.kegg = load_metabolism("metabolism.v8.01May2023.pkl")
+        cls.seedSet = list(set(load_compounds('seeds.Goldford2022.csv')["ID"]))
+
+    def test_kegg_contract_batch(self):
+        """Batch contraction on real network."""
+        R, P, x0, b = rpxb(self.kegg, self.seedSet)
+
+        x_expanded, y_expanded = ne.netExp(R, P, x0, b)
+
+        n_reactions = R.shape[1]
+        np.random.seed(456)
+        n_batches = 20
+        y_extinct_batch = (np.random.random((n_batches, n_reactions)) < 0.1).astype(np.uint8)
+
+        x_batch, y_batch = netContract_batch_rs(R, P, x_expanded, y_expanded, y_extinct_batch)
+
+        for i in range(n_batches):
+            y_extinct = csr_matrix(y_extinct_batch[i]).T
+            Xac_py, Yac_py = ne.netContract(R, P, b, x_expanded, y_expanded, y_extinct)
+            x_py = Xac_py[-1]
+            y_py = Yac_py[-1]
+
+            np.testing.assert_array_equal(x_batch[i], x_py.toarray().ravel())
+            np.testing.assert_array_equal(y_batch[i], y_py.toarray().ravel())
+
+    def test_kegg_contract_batch_large(self):
+        """Batch contraction with many extinction sets."""
+        R, P, x0, b = rpxb(self.kegg, self.seedSet)
+
+        x_expanded, y_expanded = ne.netExp(R, P, x0, b)
+
+        n_reactions = R.shape[1]
+        np.random.seed(789)
+        n_batches = 100
+        y_extinct_batch = (np.random.random((n_batches, n_reactions)) < 0.1).astype(np.uint8)
+
+        x_batch, y_batch = netContract_batch_rs(R, P, x_expanded, y_expanded, y_extinct_batch)
+
+        for i in range(n_batches):
+            y_extinct = csr_matrix(y_extinct_batch[i]).T
+            Xac_py, Yac_py = ne.netContract(R, P, b, x_expanded, y_expanded, y_extinct)
+            x_py = Xac_py[-1]
+            y_py = Yac_py[-1]
+
+            np.testing.assert_array_equal(x_batch[i], x_py.toarray().ravel())
+            np.testing.assert_array_equal(y_batch[i], y_py.toarray().ravel())
 
 if __name__ == "__main__":
     unittest.main()
