@@ -1,17 +1,22 @@
-# benchmark_rust_vs_python.py
+import warnings
+from scipy.sparse import SparseEfficiencyWarning
+warnings.filterwarnings('ignore', category=SparseEfficiencyWarning)
 
-import time
-import json
-import os
-from datetime import datetime
 import numpy as np
 from scipy.sparse import csr_matrix
 import networkExpansionPy.lib as ne
 import netexprs
-import multiprocessing
 import pandas as pd
+import time
+import json
+import os
+from datetime import datetime
+import multiprocessing
 
-RESULTS_FILE = "benchmark_results.json"
+# Get the directory containing the current file
+current_dir = os.path.dirname(os.path.abspath(__file__))
+
+RESULTS_FILE = os.path.join(current_dir, "benchmark_results.json")
 
 def load_metabolism(fname):
     return pd.read_pickle(ne.asset_path  + "/metabolic_networks/" + fname)
@@ -19,22 +24,17 @@ def load_metabolism(fname):
 def load_compounds(fname):
     return pd.read_csv(ne.asset_path  + "/compounds/" + fname)
 
-
 def load_results():
     if os.path.exists(RESULTS_FILE):
         with open(RESULTS_FILE, "r") as f:
             return json.load(f)
     return []
 
-
 def save_results(results):
     with open(RESULTS_FILE, "w") as f:
         json.dump(results, f, indent=2)
 
-
 def benchmark(fn, args, n_runs=10, warmup=2):
-    """Run function multiple times and return timing stats."""
-    # Warmup
     for _ in range(warmup):
         fn(*args)
     
@@ -52,9 +52,9 @@ def benchmark(fn, args, n_runs=10, warmup=2):
         "n_runs": n_runs,
     }
 
-
 def run_benchmarks():
-    # Load data once
+    # Load data
+    print("Loading data...")
     kegg = load_metabolism("metabolism.v8.01May2023.pkl")
     seedSet = list(set(load_compounds('seeds.Goldford2022.csv')["ID"]))
     
@@ -92,28 +92,21 @@ def run_benchmarks():
         "benchmarks": {}
     }
     
-    # Benchmark 1: Single expansion
-    print("Benchmarking single expansion...")
-    
+    # --- Benchmark 1: Single Expansion ---
+    print("\nBenchmarking single expansion...")
     results["benchmarks"]["expand_python"] = benchmark(
-        lambda: ne.netExp(R, P, x0_sparse, b_sparse),
-        [],
-        n_runs=20
+        lambda: ne.netExp(R, P, x0_sparse, b_sparse), [], n_runs=10
     )
-    
     results["benchmarks"]["expand_rust"] = benchmark(
         lambda: netexprs.expand(
             rt_data, rt_indices, rt_indptr, n_reactions,
             p_data, p_indices, p_indptr, n_compounds,
             x0_arr.copy(), b_arr
-        ),
-        [],
-        n_runs=20
+        ), [], n_runs=10
     )
-    
-    # Benchmark 2: Masked expansion (single)
+
+    # --- Benchmark 2: Masked Expansion (Single) ---
     print("Benchmarking single masked expansion...")
-    
     np.random.seed(42)
     mask = (np.random.random(n_reactions) > 0.1).astype(np.uint8)
     reaction_mask_matrix = csr_matrix(np.diag(mask))
@@ -123,7 +116,7 @@ def run_benchmarks():
     results["benchmarks"]["expand_masked_python"] = benchmark(
         lambda: ne.netExp(Rstar, Pstar, x0_sparse, b_sparse),
         [],
-        n_runs=20
+        n_runs=10
     )
     
     results["benchmarks"]["expand_masked_rust"] = benchmark(
@@ -133,18 +126,17 @@ def run_benchmarks():
             x0_arr.copy(), b_arr, mask
         ),
         [],
-        n_runs=20
+        n_runs=10
     )
-    
-    # Benchmark 3: Batch masked expansion
-    for n_masks in [10, 100, 1000]:
+
+    # --- Benchmark 3: Batch Masked Expansion ---
+    for n_masks in [9]:
         print(f"Benchmarking batch masked expansion (n={n_masks})...")
         
         np.random.seed(123)
         masks = (np.random.random((n_masks, n_reactions)) > 0.1).astype(np.uint8)
         
         # Convert masks to the format run_expansions_reactionMasks_parallel expects
-        # It expects lists of reaction tuples to remove, not binary masks
         masked_reaction_sets = []
         for i in range(n_masks):
             removed_rxns = [kegg.idx_to_rid[j] for j in range(n_reactions) if masks[i, j] == 0]
@@ -167,7 +159,77 @@ def run_benchmarks():
             [],
             n_runs=3
         )
+
+    # --- Setup for Contraction ---
+    print("\nRunning initial expansion to setup contraction benchmarks...")
+    # Get a valid full scope to contract from
+    x_expanded_sparse, y_expanded_sparse = ne.netExp(R, P, x0_sparse, b_sparse)
     
+    # Convert to arrays for Rust
+    x_expanded_arr = np.asarray(x_expanded_sparse.toarray()).ravel().astype(np.uint8)
+    y_expanded_arr = np.asarray(y_expanded_sparse.toarray()).ravel().astype(np.uint8)
+    
+    # Convert to lists of IDs for Python high-level functions
+    cidx = np.nonzero(x_expanded_sparse.toarray().T[0])[0]
+    compoundScope = [kegg.idx_to_cid[i] for i in cidx]
+    
+    ridx = np.nonzero(y_expanded_sparse.toarray().T[0])[0]
+    reactionScope = [kegg.idx_to_rid[i] for i in ridx]
+    
+    # --- Benchmark 4: Single Contraction ---
+    print("Benchmarking single contraction...")
+    
+    # Generate random extinction (5% of reactions)
+    np.random.seed(55)
+    y_extinct_arr = (np.random.random(n_reactions) < 0.05).astype(np.uint8)
+    y_extinct_sparse = csr_matrix(y_extinct_arr).T
+    
+    results["benchmarks"]["contract_python"] = benchmark(
+        lambda: ne.netContract(R, P, b_sparse, x_expanded_sparse, y_expanded_sparse, y_extinct_sparse),
+        [], n_runs=10
+    )
+    
+    results["benchmarks"]["contract_rust"] = benchmark(
+        lambda: netexprs.contract(
+            rt_data, rt_indices, rt_indptr, n_reactions,
+            p_data, p_indices, p_indptr, n_compounds,
+            x_expanded_arr, y_expanded_arr, y_extinct_arr
+        ),
+        [], n_runs=10
+    )
+    
+    # --- Benchmark 5: Batch Contraction ---
+    for n_batches in [9]:
+        print(f"Benchmarking batch contraction (n={n_batches})...")
+        
+        np.random.seed(999)
+        # Create N random extinction sets
+        y_extinct_batch = (np.random.random((n_batches, n_reactions)) < 0.05).astype(np.uint8)
+        
+        # Prepare list of lists of IDs for Python
+        extinct_reaction_sets = []
+        for i in range(n_batches):
+            # Extract IDs of extinct reactions
+            extinct_indices = np.where(y_extinct_batch[i] == 1)[0]
+            extinct_ids = [kegg.idx_to_rid[idx] for idx in extinct_indices]
+            extinct_reaction_sets.append(extinct_ids)
+            
+        # Benchmark Python (using high-level wrapper)
+        results["benchmarks"][f"contract_batch_{n_batches}_python"] = benchmark(
+            lambda: kegg.run_contractions(seedSet, reactionScope, compoundScope, extinct_reaction_sets),
+            [], n_runs=3
+        )
+        
+        # Benchmark Rust (using batch function)
+        results["benchmarks"][f"contract_batch_{n_batches}_rust"] = benchmark(
+            lambda: netexprs.contract_batch(
+                rt_data, rt_indices, rt_indptr, n_reactions,
+                p_data, p_indices, p_indptr, n_compounds,
+                x_expanded_arr, y_expanded_arr, y_extinct_batch
+            ),
+            [], n_runs=3
+        )
+
     # Print summary
     print("\n" + "="*60)
     print("RESULTS SUMMARY")
@@ -177,36 +239,30 @@ def run_benchmarks():
     print()
     
     for name, stats in results["benchmarks"].items():
-        print(f"{name}: {stats['mean']*1000:.2f}ms (±{stats['std']*1000:.2f}ms)")
-    
-    # Calculate speedups
+        print(f"{name:<35}: {stats['mean']*1000:.2f}ms (±{stats['std']*1000:.2f}ms)")
+        
     print("\n" + "-"*60)
     print("SPEEDUPS (Python / Rust)")
     print("-"*60)
     
-    if "expand_python" in results["benchmarks"] and "expand_rust" in results["benchmarks"]:
-        speedup = results["benchmarks"]["expand_python"]["mean"] / results["benchmarks"]["expand_rust"]["mean"]
-        print(f"Single expansion: {speedup:.2f}x")
+    pairs = [
+        ("expand_python", "expand_rust", "Single Expansion"),
+        ("expand_masked_python", "expand_masked_rust", "Masked Expansion"),
+        ("expand_batch_10_python_parallel", "expand_batch_10_rust_parallel", "Batch Expansion (n=10)"),
+        ("contract_python", "contract_rust", "Single Contraction"),
+        ("contract_batch_10_python", "contract_batch_10_rust", "Batch Contraction (n=10)")
+    ]
     
-    if "expand_masked_python" in results["benchmarks"] and "expand_masked_rust" in results["benchmarks"]:
-        speedup = results["benchmarks"]["expand_masked_python"]["mean"] / results["benchmarks"]["expand_masked_rust"]["mean"]
-        print(f"Single masked expansion: {speedup:.2f}x")
-    
-    for n_masks in [10, 100, 1000]:
-        py_key = f"expand_batch_{n_masks}_python_parallel"
-        rs_key = f"expand_batch_{n_masks}_rust_parallel"
-        if py_key in results["benchmarks"] and rs_key in results["benchmarks"]:
-            speedup = results["benchmarks"][py_key]["mean"] / results["benchmarks"][rs_key]["mean"]
-            print(f"Batch {n_masks} masks: {speedup:.2f}x")
-    
+    for py, rs, label in pairs:
+        if py in results["benchmarks"] and rs in results["benchmarks"]:
+            speedup = results["benchmarks"][py]["mean"] / results["benchmarks"][rs]["mean"]
+            print(f"{label:<30}: {speedup:.2f}x")
+
     # Save results
     all_results = load_results()
     all_results.append(results)
     save_results(all_results)
     print(f"\nResults saved to {RESULTS_FILE}")
-    
-    return results
-
 
 if __name__ == "__main__":
     run_benchmarks()
