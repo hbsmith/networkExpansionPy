@@ -1,3 +1,7 @@
+import warnings
+from scipy.sparse import SparseEfficiencyWarning
+warnings.filterwarnings('ignore', category=SparseEfficiencyWarning)
+
 import unittest
 import numpy as np
 from scipy.sparse import csr_matrix
@@ -6,6 +10,11 @@ import netexprs
 import pandas as pd
 
 
+def load_metabolism(fname):
+    return pd.read_pickle(ne.asset_path  + "/metabolic_networks/" + fname)
+
+def load_compounds(fname):
+    return pd.read_csv(ne.asset_path  + "/compounds/" + fname)
 
 def rpxb(m, seedSet):
     """Extract R, P, x0, b matrices from a GlobalMetabolicNetwork."""
@@ -43,6 +52,74 @@ def netExp_rs(R, P, x, b):
 
     return x_out, y_out
 
+def netExp_masked_rs(R, P, x, b, mask):
+    """Rust wrapper for masked expansion."""
+    R_T = R.T.tocsr()
+    P = P.tocsr()
+
+    x_out, y_out = netexprs.expand_masked(
+        R_T.data.astype(np.float64),
+        R_T.indices.astype(np.int32),
+        R_T.indptr.astype(np.int32),
+        R_T.shape[0],
+        P.data.astype(np.float64),
+        P.indices.astype(np.int32),
+        P.indptr.astype(np.int32),
+        P.shape[0],
+        np.asarray(x.toarray()).ravel().astype(np.uint8),
+        np.asarray(b.toarray()).ravel().astype(np.float64),
+        mask.astype(np.uint8),
+    )
+
+    return x_out, y_out
+
+def netExp_masked_py(R, P, x, b, mask):
+    """Python masked expansion using diagonal matrix approach."""
+    reaction_mask = csr_matrix(np.diag(mask))
+    Rstar = R * reaction_mask
+    Pstar = P * reaction_mask
+    return ne.netExp(Rstar, Pstar, x, b)
+
+def netExp_masked_batch_rs(R, P, x, b, masks):
+    """Rust wrapper for batch masked expansion."""
+    R_T = R.T.tocsr()
+    P = P.tocsr()
+
+    x_out, y_out = netexprs.expand_masked_batch(
+        R_T.data.astype(np.float64),
+        R_T.indices.astype(np.int32),
+        R_T.indptr.astype(np.int32),
+        R_T.shape[0],
+        P.data.astype(np.float64),
+        P.indices.astype(np.int32),
+        P.indptr.astype(np.int32),
+        P.shape[0],
+        np.asarray(x.toarray()).ravel().astype(np.uint8),
+        np.asarray(b.toarray()).ravel().astype(np.float64),
+        masks.astype(np.uint8),
+    )
+
+    return x_out, y_out
+
+def netContract_rs(R, P, y_active, y_extinct):
+    """Rust wrapper for network contraction."""
+    R_T = R.T.tocsr()
+    P = P.tocsr()
+
+    x_out, y_out = netexprs.contract(
+        R_T.data.astype(np.float64),
+        R_T.indices.astype(np.int32),
+        R_T.indptr.astype(np.int32),
+        R_T.shape[0],
+        P.data.astype(np.float64),
+        P.indices.astype(np.int32),
+        P.indptr.astype(np.int32),
+        P.shape[0],
+        np.asarray(y_active.toarray()).ravel().astype(np.uint8),
+        np.asarray(y_extinct.toarray()).ravel().astype(np.uint8),
+    )
+
+    return x_out, y_out
 
 class TestExpandParity(unittest.TestCase):
 
@@ -106,37 +183,6 @@ class TestExpandParity(unittest.TestCase):
 
         np.testing.assert_array_equal(x_rs, x_py.toarray().ravel())
         np.testing.assert_array_equal(y_rs, y_py.toarray().ravel())
-
-def netExp_masked_rs(R, P, x, b, mask):
-    """Rust wrapper for masked expansion."""
-    R_T = R.T.tocsr()
-    P = P.tocsr()
-
-    x_out, y_out = netexprs.expand_masked(
-        R_T.data.astype(np.float64),
-        R_T.indices.astype(np.int32),
-        R_T.indptr.astype(np.int32),
-        R_T.shape[0],
-        P.data.astype(np.float64),
-        P.indices.astype(np.int32),
-        P.indptr.astype(np.int32),
-        P.shape[0],
-        np.asarray(x.toarray()).ravel().astype(np.uint8),
-        np.asarray(b.toarray()).ravel().astype(np.float64),
-        mask.astype(np.uint8),
-    )
-
-    return x_out, y_out
-
-
-def netExp_masked_py(R, P, x, b, mask):
-    """Python masked expansion using diagonal matrix approach."""
-    reaction_mask = csr_matrix(np.diag(mask))
-    Rstar = R * reaction_mask
-    Pstar = P * reaction_mask
-    return ne.netExp(Rstar, Pstar, x, b)
-
-
 class TestExpandMaskedParity(unittest.TestCase):
 
     def test_toy_network_masked(self):
@@ -190,25 +236,16 @@ class TestExpandMaskedParity(unittest.TestCase):
 
         np.testing.assert_array_equal(x_rs, x_py.toarray().ravel())
         np.testing.assert_array_equal(y_rs, y_py.toarray().ravel())
-
-
-def load_metabolism(fname):
-    return pd.read_pickle(ne.asset_path  + "/metabolic_networks/" + fname)
-
-def load_compounds(fname):
-    return pd.read_csv(ne.asset_path  + "/compounds/" + fname)
-
 class TestExpandLargeNetwork(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
         """Load KEGG network once for all tests in this class."""
         cls.kegg = load_metabolism("metabolism.v8.01May2023.pkl")
+        cls.seedSet = list(set(load_compounds('seeds.Goldford2022.csv')["ID"]))
 
     def test_kegg_network(self):
-        seedSet = list(set(load_compounds('seeds.Goldford2022.csv')["ID"]))
-
-        R, P, x0, b = rpxb(self.kegg, seedSet)
+        R, P, x0, b = rpxb(self.kegg, self.seedSet)
 
         x_py, y_py = ne.netExp(R, P, x0, b)
         x_rs, y_rs = netExp_rs(R, P, x0, b)
@@ -235,12 +272,11 @@ class TestExpandMaskedLargeNetwork(unittest.TestCase):
     def setUpClass(cls):
         """Load KEGG network once for all tests in this class."""
         cls.kegg = load_metabolism("metabolism.v8.01May2023.pkl")
+        cls.seedSet = list(set(load_compounds('seeds.Goldford2022.csv')["ID"]))
 
     def test_kegg_masked_random(self):
         """Randomly mask 10% of reactions."""
-        seedSet = list(set(load_compounds('seeds.Goldford2022.csv')["ID"]))
-
-        R, P, x0, b = rpxb(self.kegg, seedSet)
+        R, P, x0, b = rpxb(self.kegg, self.seedSet)
 
         n_reactions = R.shape[1]
         np.random.seed(42)
@@ -254,9 +290,7 @@ class TestExpandMaskedLargeNetwork(unittest.TestCase):
 
     def test_kegg_masked_half(self):
         """Mask out first half of reactions."""
-        seedSet = list(set(load_compounds('seeds.Goldford2022.csv')["ID"]))
-
-        R, P, x0, b = rpxb(self.kegg, seedSet)
+        R, P, x0, b = rpxb(self.kegg, self.seedSet)
 
         n_reactions = R.shape[1]
         mask = np.ones(n_reactions, dtype=np.uint8)
@@ -268,6 +302,220 @@ class TestExpandMaskedLargeNetwork(unittest.TestCase):
         np.testing.assert_array_equal(x_rs, x_py.toarray().ravel())
         np.testing.assert_array_equal(y_rs, y_py.toarray().ravel())
 
+class TestExpandMaskedBatchParity(unittest.TestCase):
+
+    def test_toy_batch(self):
+        """Run multiple masked expansions in batch."""
+        toy = ne.GlobalMetabolicNetwork("dev")
+        rxns = [
+            (["A", "B"], ["C"]),
+            (["C", "D"], ["E", "F"]),
+            (["E", "F"], ["G"]),
+            (["G", "H"], ["I"]),
+            (["A", "J"], ["I"]),
+        ]
+        toy.network = ne._load_tuple_network(rxns)
+        toy.convertToIrreversible()
+
+        R, P, x0, b = rpxb(toy, ["A", "B", "D", "H"])
+        n_reactions = R.shape[1]
+
+        # Create 5 different masks
+        np.random.seed(123)
+        masks = (np.random.random((5, n_reactions)) > 0.3).astype(np.uint8)
+
+        x_batch, y_batch = netExp_masked_batch_rs(R, P, x0, b, masks)
+
+        # Compare each row against individual Python runs
+        for i in range(masks.shape[0]):
+            x_py, y_py = netExp_masked_py(R, P, x0, b, masks[i])
+            np.testing.assert_array_equal(x_batch[i], x_py.toarray().ravel())
+            np.testing.assert_array_equal(y_batch[i], y_py.toarray().ravel())
+
+    @classmethod
+    def setUpClass(cls):
+        """Load real metabolic network once for all tests in this class."""
+        cls.kegg = load_metabolism("metabolism.v8.01May2023.pkl")
+        cls.seedSet = list(set(load_compounds('seeds.Goldford2022.csv')["ID"]))
+
+    def test_kegg_batch(self):
+        """Batch masked expansion on real network."""
+        R, P, x0, b = rpxb(self.kegg, self.seedSet)
+        n_reactions = R.shape[1]
+
+        # Create 20 different masks
+        np.random.seed(456)
+        masks = (np.random.random((20, n_reactions)) > 0.1).astype(np.uint8)
+
+        x_batch, y_batch = netExp_masked_batch_rs(R, P, x0, b, masks)
+
+        # Compare each row against individual Python runs
+        for i in range(masks.shape[0]):
+            x_py, y_py = netExp_masked_py(R, P, x0, b, masks[i])
+            np.testing.assert_array_equal(x_batch[i], x_py.toarray().ravel())
+            np.testing.assert_array_equal(y_batch[i], y_py.toarray().ravel())
+
+    def test_kegg_batch_large(self):
+        """Batch masked expansion with many masks."""
+        R, P, x0, b = rpxb(self.kegg, self.seedSet)
+        n_reactions = R.shape[1]
+
+        # Create 100 different masks
+        np.random.seed(789)
+        masks = (np.random.random((100, n_reactions)) > 0.1).astype(np.uint8)
+
+        x_batch, y_batch = netExp_masked_batch_rs(R, P, x0, b, masks)
+
+        # Compare each row against individual Python runs
+        for i in range(masks.shape[0]):
+            x_py, y_py = netExp_masked_py(R, P, x0, b, masks[i])
+            np.testing.assert_array_equal(x_batch[i], x_py.toarray().ravel())
+            np.testing.assert_array_equal(y_batch[i], y_py.toarray().ravel())
+
+class TestContractParity(unittest.TestCase):
+
+    def test_toy_contract(self):
+        """Contract after expansion, removing one reaction."""
+        toy = ne.GlobalMetabolicNetwork("dev")
+        rxns = [
+            (["A", "B"], ["C"]),
+            (["C", "D"], ["E", "F"]),
+            (["E", "F"], ["G"]),
+            (["G", "H"], ["I"]),
+            (["A", "J"], ["I"]),
+        ]
+        toy.network = ne._load_tuple_network(rxns)
+        toy.convertToIrreversible()
+
+        R, P, x0, b = rpxb(toy, ["A", "B", "D", "H"])
+
+        # First expand to get full scope
+        x_expanded, y_expanded = ne.netExp(R, P, x0, b)
+
+        # Mark some reactions as extinct
+        n_reactions = R.shape[1]
+        y_extinct = csr_matrix(np.zeros(n_reactions)).T
+        y_extinct[0, 0] = 1  # Kill first reaction
+
+        # Python contraction
+        Xac_py, Yac_py = ne.netContract(R, P, b, x_expanded, y_expanded, y_extinct)
+        x_py = Xac_py[-1]
+        y_py = Yac_py[-1]
+
+        # Rust contraction
+        x_rs, y_rs = netContract_rs(R, P, y_expanded, y_extinct)
+
+        np.testing.assert_array_equal(x_rs, x_py.toarray().ravel())
+        np.testing.assert_array_equal(y_rs, y_py.toarray().ravel())
+
+    def test_toy_contract_multiple_extinct(self):
+        """Contract with multiple extinct reactions."""
+        toy = ne.GlobalMetabolicNetwork("dev")
+        rxns = [
+            (["A", "B"], ["C"]),
+            (["C", "D"], ["E", "F"]),
+            (["E", "F"], ["G"]),
+            (["G", "H"], ["I"]),
+            (["A", "J"], ["I"]),
+        ]
+        toy.network = ne._load_tuple_network(rxns)
+        toy.convertToIrreversible()
+
+        R, P, x0, b = rpxb(toy, ["A", "B", "D", "H"])
+
+        x_expanded, y_expanded = ne.netExp(R, P, x0, b)
+
+        n_reactions = R.shape[1]
+        y_extinct = csr_matrix(np.zeros(n_reactions)).T
+        y_extinct[0, 0] = 1
+        y_extinct[2, 0] = 1
+        y_extinct[4, 0] = 1
+
+        Xac_py, Yac_py = ne.netContract(R, P, b, x_expanded, y_expanded, y_extinct)
+        x_py = Xac_py[-1]
+        y_py = Yac_py[-1]
+
+        x_rs, y_rs = netContract_rs(R, P, y_expanded, y_extinct)
+
+        np.testing.assert_array_equal(x_rs, x_py.toarray().ravel())
+        np.testing.assert_array_equal(y_rs, y_py.toarray().ravel())
+
+    def test_toy_contract_no_extinction(self):
+        """Contract with no extinct reactions (should be no-op)."""
+        toy = ne.GlobalMetabolicNetwork("dev")
+        rxns = [
+            (["A", "B"], ["C"]),
+            (["C", "D"], ["E", "F"]),
+            (["E", "F"], ["G"]),
+            (["G", "H"], ["I"]),
+            (["A", "J"], ["I"]),
+        ]
+        toy.network = ne._load_tuple_network(rxns)
+        toy.convertToIrreversible()
+
+        R, P, x0, b = rpxb(toy, ["A", "B", "D", "H"])
+
+        x_expanded, y_expanded = ne.netExp(R, P, x0, b)
+
+        n_reactions = R.shape[1]
+        y_extinct = csr_matrix(np.zeros(n_reactions)).T
+
+        Xac_py, Yac_py = ne.netContract(R, P, b, x_expanded, y_expanded, y_extinct)
+        x_py = Xac_py[-1]
+        y_py = Yac_py[-1]
+
+        x_rs, y_rs = netContract_rs(R, P, y_expanded, y_extinct)
+
+        np.testing.assert_array_equal(x_rs, x_py.toarray().ravel())
+        np.testing.assert_array_equal(y_rs, y_py.toarray().ravel())
+
+
+class TestContractLargeNetwork(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.kegg = load_metabolism("metabolism.v8.01May2023.pkl")
+        cls.seedSet = list(set(load_compounds('seeds.Goldford2022.csv')["ID"]))
+
+    def test_kegg_contract(self):
+        """Contract on real network."""
+        R, P, x0, b = rpxb(self.kegg, self.seedSet)
+
+        x_expanded, y_expanded = ne.netExp(R, P, x0, b)
+
+        n_reactions = R.shape[1]
+        np.random.seed(42)
+        y_extinct_arr = (np.random.random(n_reactions) < 0.05).astype(np.int32)
+        y_extinct = csr_matrix(y_extinct_arr).T
+
+        Xac_py, Yac_py = ne.netContract(R, P, b, x_expanded, y_expanded, y_extinct)
+        x_py = Xac_py[-1]
+        y_py = Yac_py[-1]
+
+        x_rs, y_rs = netContract_rs(R, P, y_expanded, y_extinct)
+
+        np.testing.assert_array_equal(x_rs, x_py.toarray().ravel())
+        np.testing.assert_array_equal(y_rs, y_py.toarray().ravel())
+
+    def test_kegg_contract_heavy_extinction(self):
+        """Contract with many extinct reactions."""
+        R, P, x0, b = rpxb(self.kegg, self.seedSet)
+
+        x_expanded, y_expanded = ne.netExp(R, P, x0, b)
+
+        n_reactions = R.shape[1]
+        np.random.seed(123)
+        y_extinct_arr = (np.random.random(n_reactions) < 0.3).astype(np.int32)
+        y_extinct = csr_matrix(y_extinct_arr).T
+
+        Xac_py, Yac_py = ne.netContract(R, P, b, x_expanded, y_expanded, y_extinct)
+        x_py = Xac_py[-1]
+        y_py = Yac_py[-1]
+
+        x_rs, y_rs = netContract_rs(R, P, y_expanded, y_extinct)
+
+        np.testing.assert_array_equal(x_rs, x_py.toarray().ravel())
+        np.testing.assert_array_equal(y_rs, y_py.toarray().ravel())
 
 if __name__ == "__main__":
     unittest.main()
