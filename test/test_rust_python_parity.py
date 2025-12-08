@@ -1,6 +1,6 @@
-import warnings
-from scipy.sparse import SparseEfficiencyWarning
-warnings.filterwarnings('ignore', category=SparseEfficiencyWarning)
+# import warnings
+# from scipy.sparse import SparseEfficiencyWarning
+# warnings.filterwarnings('ignore', category=SparseEfficiencyWarning)
 
 import unittest
 import numpy as np
@@ -8,13 +8,6 @@ from scipy.sparse import csr_matrix
 import networkExpansionPy.lib as ne
 import netexprs
 import pandas as pd
-
-
-def load_metabolism(fname):
-    return pd.read_pickle(ne.asset_path  + "/metabolic_networks/" + fname)
-
-def load_compounds(fname):
-    return pd.read_csv(ne.asset_path  + "/compounds/" + fname)
 
 def rpxb(m, seedSet):
     """Extract R, P, x0, b matrices from a GlobalMetabolicNetwork."""
@@ -261,8 +254,8 @@ class TestExpandLargeNetwork(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Load KEGG network once for all tests in this class."""
-        cls.kegg = load_metabolism("metabolism.v8.01May2023.pkl")
-        cls.seedSet = list(set(load_compounds('seeds.Goldford2022.csv')["ID"]))
+        cls.kegg = ne.load_metabolism("metabolism.v8.01May2023.pkl")
+        cls.seedSet = list(set(ne.load_compounds('seeds.Goldford2022.csv')["ID"]))
 
     def test_kegg_network(self):
         R, P, x0, b = rpxb(self.kegg, self.seedSet)
@@ -291,8 +284,8 @@ class TestExpandMaskedLargeNetwork(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Load KEGG network once for all tests in this class."""
-        cls.kegg = load_metabolism("metabolism.v8.01May2023.pkl")
-        cls.seedSet = list(set(load_compounds('seeds.Goldford2022.csv')["ID"]))
+        cls.kegg = ne.load_metabolism("metabolism.v8.01May2023.pkl")
+        cls.seedSet = list(set(ne.load_compounds('seeds.Goldford2022.csv')["ID"]))
 
     def test_kegg_masked_random(self):
         """Randomly mask 10% of reactions."""
@@ -355,8 +348,8 @@ class TestExpandMaskedBatchParity(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Load real metabolic network once for all tests in this class."""
-        cls.kegg = load_metabolism("metabolism.v8.01May2023.pkl")
-        cls.seedSet = list(set(load_compounds('seeds.Goldford2022.csv')["ID"]))
+        cls.kegg = ne.load_metabolism("metabolism.v8.01May2023.pkl")
+        cls.seedSet = list(set(ne.load_compounds('seeds.Goldford2022.csv')["ID"]))
 
     def test_kegg_batch(self):
         """Batch masked expansion on real network."""
@@ -494,8 +487,8 @@ class TestContractLargeNetwork(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.kegg = load_metabolism("metabolism.v8.01May2023.pkl")
-        cls.seedSet = list(set(load_compounds('seeds.Goldford2022.csv')["ID"]))
+        cls.kegg = ne.load_metabolism("metabolism.v8.01May2023.pkl")
+        cls.seedSet = list(set(ne.load_compounds('seeds.Goldford2022.csv')["ID"]))
 
     def test_kegg_contract(self):
         """Contract on real network."""
@@ -621,8 +614,8 @@ class TestContractBatchLargeNetwork(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.kegg = load_metabolism("metabolism.v8.01May2023.pkl")
-        cls.seedSet = list(set(load_compounds('seeds.Goldford2022.csv')["ID"]))
+        cls.kegg = ne.load_metabolism("metabolism.v8.01May2023.pkl")
+        cls.seedSet = list(set(ne.load_compounds('seeds.Goldford2022.csv')["ID"]))
 
     def test_kegg_contract_batch(self):
         """Batch contraction on real network."""
