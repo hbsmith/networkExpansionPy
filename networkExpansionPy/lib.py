@@ -275,6 +275,9 @@ class GlobalMetabolicNetwork:
         # Handle old pickles that have 'network' instead of '_network'
         if 'network' in state and '_network' not in state:
             state['_network'] = state.pop('network')
+        # Handle old pickles that don't have '_rust_arrays'
+        if '_rust_arrays' not in state:
+            state['_rust_arrays'] = None
         self.__dict__.update(state)
 
     @property
