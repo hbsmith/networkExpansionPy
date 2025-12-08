@@ -139,7 +139,7 @@ def run_benchmarks():
         
         # Python parallel
         results["benchmarks"][f"expand_batch_{n_masks}_python_parallel"] = benchmark(
-            lambda: kegg.run_expansions_reactionMasks_parallel(seedSet, masked_reaction_sets),
+            lambda: kegg._run_expansions_reactionMasks_parallel_python(seedSet, masked_reaction_sets),
             [],
             n_runs=3
         )
@@ -211,7 +211,7 @@ def run_benchmarks():
             
         # Benchmark Python (using high-level wrapper)
         results["benchmarks"][f"contract_batch_{n_batches}_python"] = benchmark(
-            lambda: kegg.run_contractions(seedSet, reactionScope, compoundScope, extinct_reaction_sets),
+            lambda: kegg._run_contractions_python(reactionScope, compoundScope, extinct_reaction_sets),
             [], n_runs=3
         )
         
