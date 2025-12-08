@@ -9,6 +9,13 @@ import pickle
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 
+# Try to import Rust acceleration module
+try:
+    import netexprs
+    _HAS_RUST = True
+except ImportError:
+    _HAS_RUST = False
+
 # define asset path
 asset_path,filename = os.path.split(os.path.abspath(__file__))
 asset_path = asset_path + '/assets'
@@ -248,7 +255,76 @@ class GlobalMetabolicNetwork:
         self.cid_to_idx = None
         self.idx_to_cid = None
         self.S = None
+        self._rust_arrays = None  # Lazily initialized cache for Rust arrays
         
+    def _ensure_dicts(self):
+        """Ensure compound and reaction dictionaries are initialized."""
+        if self.rid_to_idx is None or self.idx_to_rid is None:
+            self.rid_to_idx, self.idx_to_rid = self.create_reaction_dicts()
+        if self.cid_to_idx is None or self.idx_to_cid is None:
+            self.cid_to_idx, self.idx_to_cid = self.create_compound_dicts()
+    
+    def _ensure_rust_ready(self):
+        """Lazily prepare arrays needed for Rust acceleration."""
+        if self._rust_arrays is not None:
+            return
+        
+        self._ensure_dicts()
+        
+        # Build R and P matrices
+        R, P = self.create_RP_from_irreversible_network()
+        R = csr_matrix(R)
+        P = csr_matrix(P)
+        
+        # Compute b vector
+        b = np.asarray(R.sum(axis=0)).ravel()
+        
+        # Convert R^T to CSR format for Rust
+        R_T = R.T.tocsr()
+        
+        # Cache all arrays needed by Rust functions
+        self._rust_arrays = {
+            'rt_data': R_T.data.astype(np.float64),
+            'rt_indices': R_T.indices.astype(np.int32),
+            'rt_indptr': R_T.indptr.astype(np.int32),
+            'p_data': P.data.astype(np.float64),
+            'p_indices': P.indices.astype(np.int32),
+            'p_indptr': P.indptr.astype(np.int32),
+            'n_reactions': R.shape[1],
+            'n_compounds': P.shape[0],
+            'b': b.astype(np.float64),
+            # Also cache sparse matrices for Python fallback
+            'R': R,
+            'P': P,
+            'b_sparse': csr_matrix(b).T,
+        }
+    
+    def _invalidate_rust_cache(self):
+        """Invalidate cached Rust arrays. Call this after modifying the network."""
+        self._rust_arrays = None
+        self.rid_to_idx = None
+        self.idx_to_rid = None
+        self.cid_to_idx = None
+        self.idx_to_cid = None
+    
+    def _x_to_compounds(self, x_arr):
+        """Convert compound boolean array to list of compound IDs."""
+        if isinstance(x_arr, np.ndarray):
+            cidx = np.nonzero(x_arr)[0]
+        else:
+            # Handle sparse matrix
+            cidx = np.nonzero(x_arr.toarray().ravel())[0]
+        return [self.idx_to_cid[i] for i in cidx]
+    
+    def _y_to_reactions(self, y_arr):
+        """Convert reaction boolean array to list of reaction IDs."""
+        if isinstance(y_arr, np.ndarray):
+            ridx = np.nonzero(y_arr)[0]
+        else:
+            # Handle sparse matrix
+            ridx = np.nonzero(y_arr.toarray().ravel())[0]
+        return [self.idx_to_rid[i] for i in ridx]
+
     def copy(self):
         return deepcopy(self)
         
@@ -311,6 +387,7 @@ class GlobalMetabolicNetwork:
             self.network = self.network[self.network.rn.isin(self.consistent_rxns.rn.tolist())]
         else:
             raise(NotImplementedError("Function not yet implemented for metabolism = %s"%self.metabolism)) 
+        self._invalidate_rust_cache()
 
     def pruneUnbalancedReactions(self):
         # only keep reactions that are elementally balanced
@@ -319,10 +396,12 @@ class GlobalMetabolicNetwork:
             self.network = self.network[self.network.rn.isin(balanced.rn.tolist())]
         else:
             raise(NotImplementedError("Function not yet implemented for metabolism = %s"%self.metabolism)) 
+        self._invalidate_rust_cache()
         
     def subnetwork(self,rxns):
         # only keep reactions that are in list
         self.network = self.network[self.network.rn.isin(rxns)]
+        self._invalidate_rust_cache()
         
     def addGenericCoenzymes(self):
         replace_metabolites = {'C00003': 'Generic_oxidant', 'C00004': 'Generic_reductant', 'C00006': 'Generic_oxidant',  'C00005': 'Generic_reductant','C00016': 'Generic_oxidant','C01352':'Generic_reductant'}
@@ -349,6 +428,7 @@ class GlobalMetabolicNetwork:
 
         self.network = pd.concat([self.network,new_rxns],axis=0)
         self.thermo = pd.concat([self.thermo,new_thermo],axis=0)
+        self._invalidate_rust_cache()
 
     
     def convertToIrreversible(self):
@@ -360,6 +440,7 @@ class GlobalMetabolicNetwork:
         net = pd.concat([nf,nb],axis=0)
         net = net.set_index(['cid','rn','direction']).reset_index()
         self.network = net
+        self._invalidate_rust_cache()
     
     def setMetaboliteBounds(self,ub = 1e-1,lb = 1e-6): 
         
@@ -405,6 +486,7 @@ class GlobalMetabolicNetwork:
         res = res[~(res['effDeltaG'] > 0)].set_index(['rn','direction'])
         res = res.drop('effDeltaG',axis=1)
         self.network = res.join(self.network.set_index(['rn','direction'])).reset_index()
+        self._invalidate_rust_cache()
     
     def pruneReactionsFromMetabolite(self,cpds):
         # find all reactions that use metabolites in cpds list
@@ -497,19 +579,69 @@ class GlobalMetabolicNetwork:
 
         return id_iter
         
-    def expand(self,seedSet,algorithm='naive',reaction_mask = None):
-        # constructre network from skinny table and create matricies for NE algorithm
-        # if (self.rid_to_idx is None) or (self.idx_to_rid is None):
-        self.rid_to_idx, self.idx_to_rid = self.create_reaction_dicts()
-        # if (self.cid_to_idx is None) or (self.idx_to_cid is None):
-        self.cid_to_idx, self.idx_to_cid = self.create_compound_dicts()
-        # if self.S is None:
-        #self.S = self.create_S_from_irreversible_network()
-        x0 = self.initialize_metabolite_vector(seedSet)
+    def expand(self, seedSet, algorithm='naive', reaction_mask=None):
+        """
+        Run network expansion from a seed set of compounds.
         
-        #R = (self.S < 0)*1
-        #P = (self.S > 0)*1
-        R,P = self.create_RP_from_irreversible_network()
+        Args:
+            seedSet: List of compound IDs to start expansion from
+            algorithm: 'naive', 'cr', 'trace', or 'step'
+            reaction_mask: Optional list of reaction IDs to include (others are masked out)
+        
+        Returns:
+            For 'naive', 'cr', 'step': (compounds, reactions) - lists of IDs in scope
+            For 'trace': (compound_dict, reaction_dict) - dicts mapping ID to iteration
+        """
+        # Use Rust for naive algorithm without trace
+        if _HAS_RUST and algorithm.lower() == 'naive':
+            return self._expand_rust(seedSet, reaction_mask)
+        else:
+            return self._expand_python(seedSet, algorithm, reaction_mask)
+    
+    def _expand_rust(self, seedSet, reaction_mask=None):
+        """Rust-accelerated expansion (naive algorithm only)."""
+        self._ensure_rust_ready()
+        ra = self._rust_arrays
+        
+        # Convert seedSet to x0 array
+        x0 = self.initialize_metabolite_vector(seedSet).astype(np.uint8)
+        
+        if reaction_mask is not None:
+            # Build mask array: 1 for allowed reactions, 0 for masked
+            mask = np.ones(ra['n_reactions'], dtype=np.uint8)
+            for rid in reaction_mask:
+                if rid in self.rid_to_idx:
+                    # reaction_mask contains reactions to KEEP, so we don't zero them
+                    pass
+            # Actually, reaction_mask semantics: it's a list of reactions to INCLUDE
+            # So we need to zero out everything NOT in the mask
+            mask = np.zeros(ra['n_reactions'], dtype=np.uint8)
+            for rid in reaction_mask:
+                if rid in self.rid_to_idx:
+                    mask[self.rid_to_idx[rid]] = 1
+            
+            x_arr, y_arr = netexprs.expand_masked(
+                ra['rt_data'], ra['rt_indices'], ra['rt_indptr'], ra['n_reactions'],
+                ra['p_data'], ra['p_indices'], ra['p_indptr'], ra['n_compounds'],
+                x0, ra['b'], mask
+            )
+        else:
+            x_arr, y_arr = netexprs.expand(
+                ra['rt_data'], ra['rt_indices'], ra['rt_indptr'], ra['n_reactions'],
+                ra['p_data'], ra['p_indices'], ra['p_indptr'], ra['n_compounds'],
+                x0, ra['b']
+            )
+        
+        compounds = self._x_to_compounds(x_arr)
+        reactions = self._y_to_reactions(y_arr)
+        return compounds, reactions
+    
+    def _expand_python(self, seedSet, algorithm='naive', reaction_mask=None):
+        """Pure Python expansion (supports all algorithms)."""
+        self._ensure_dicts()
+        
+        x0 = self.initialize_metabolite_vector(seedSet)
+        R, P = self.create_RP_from_irreversible_network()
         b = sum(R)
 
         # sparsefy data
@@ -518,65 +650,85 @@ class GlobalMetabolicNetwork:
         b = csr_matrix(b)
         b = b.transpose()
 
-        # add a new term that uses sparse matrix multiplication for R and P to zero out reactions are that are not accessible
+        # add a new term that uses sparse matrix multiplication for R and P to zero out reactions that are not accessible
         if reaction_mask is not None:
-            reaction_mask = self.initialize_reaction_vector(reaction_mask)
-            reaction_mask = csr_matrix(np.diag(reaction_mask))
-            P = P*reaction_mask
-            R = R*reaction_mask
+            reaction_mask_vec = self.initialize_reaction_vector(reaction_mask)
+            reaction_mask_mat = csr_matrix(np.diag(reaction_mask_vec))
+            P = P * reaction_mask_mat
+            R = R * reaction_mask_mat
 
         x0 = csr_matrix(x0)
         x0 = x0.transpose()
+        
         if algorithm.lower() == 'naive':
-            x,y = netExp(R,P,x0,b)
+            x, y = netExp(R, P, x0, b)
         elif algorithm.lower() == 'cr':
-            x,y = netExp_cr(R,P,x0,b)
+            x, y = netExp_cr(R, P, x0, b)
         elif algorithm.lower() == 'trace':
-            X,Y = netExp_trace(R,P,x0,b)
+            X, Y = netExp_trace(R, P, x0, b)
         elif algorithm.lower() == 'step':
-            x,y = netExp_step(R,P,x0,b)
+            x, y = netExp_step(R, P, x0, b)
         else:
             raise ValueError('algorithm needs to be naive (compound stopping criteria) or cr (reaction/compound stopping criteria)')
         
         if algorithm.lower() == 'trace':
-    
-            compound_iteration_dict = self.create_iteration_dict(X,self.idx_to_cid)
-            reaction_iteration_dict = self.create_iteration_dict(Y,self.idx_to_rid)
+            compound_iteration_dict = self.create_iteration_dict(X, self.idx_to_cid)
+            reaction_iteration_dict = self.create_iteration_dict(Y, self.idx_to_rid)
             return compound_iteration_dict, reaction_iteration_dict
-
         else:
-            # convert to list of metabolite ids and reaction ids
-            if x.toarray().sum() > 0:
-                cidx = np.nonzero(x.toarray().T[0])[0]
-                compounds = [self.idx_to_cid[i] for i in cidx]
-            else:
-                compounds = []
-                
-            if y.toarray().sum() > 0:
-                ridx = np.nonzero(y.toarray().T[0])[0]
-                reactions = [self.idx_to_rid[i] for i in ridx]
-            else:
-                reactions = [];
-                
-            return compounds,reactions
+            compounds = self._x_to_compounds(x)
+            reactions = self._y_to_reactions(y)
+            return compounds, reactions
 
 
-    def contract(self,seedSet,reactionScope,compoundScope,extinctReactions):
-        # constructre network from skinny table and create matricies for NE algorithm
-        # if (self.rid_to_idx is None) or (self.idx_to_rid is None):
-        self.rid_to_idx, self.idx_to_rid = self.create_reaction_dicts()
-        # if (self.cid_to_idx is None) or (self.idx_to_cid is None):
-        self.cid_to_idx, self.idx_to_cid = self.create_compound_dicts()
-        # if self.S is None:
-        #self.S = self.create_S_from_irreversible_network()
+    def contract(self, seedSet, reactionScope, compoundScope, extinctReactions):
+        """
+        Run network contraction starting from an expanded scope.
+        
+        Args:
+            seedSet: Original seed set (unused in contraction, kept for API compatibility)
+            reactionScope: List of reaction IDs in the current scope
+            compoundScope: List of compound IDs in the current scope
+            extinctReactions: List of reaction IDs to remove (extinct)
+        
+        Returns:
+            (compounds, reactions) - lists of IDs remaining after contraction
+        """
+        if _HAS_RUST:
+            return self._contract_rust(reactionScope, compoundScope, extinctReactions)
+        else:
+            return self._contract_python(reactionScope, compoundScope, extinctReactions)
+    
+    def _contract_rust(self, reactionScope, compoundScope, extinctReactions):
+        """Rust-accelerated contraction."""
+        self._ensure_rust_ready()
+        ra = self._rust_arrays
+        
+        # Convert ID lists to arrays
+        x_active = self.initialize_metabolite_vector(compoundScope).astype(np.uint8)
+        y_active = self.initialize_reaction_vector(reactionScope).astype(np.uint8)
+        y_extinct = self.initialize_reaction_vector(extinctReactions).astype(np.uint8)
+        
+        x_arr, y_arr = netexprs.contract(
+            ra['rt_data'], ra['rt_indices'], ra['rt_indptr'], ra['n_reactions'],
+            ra['p_data'], ra['p_indices'], ra['p_indptr'], ra['n_compounds'],
+            x_active, y_active, y_extinct
+        )
+        
+        compounds = self._x_to_compounds(x_arr)
+        reactions = self._y_to_reactions(y_arr)
+        return compounds, reactions
+    
+    def _contract_python(self, reactionScope, compoundScope, extinctReactions):
+        """Pure Python contraction."""
+        self._ensure_dicts()
         
         # create vectors for reactionScope, compoundScope
         xactive = self.initialize_metabolite_vector(compoundScope)
         yactive = self.initialize_reaction_vector(reactionScope)
         yextinct = self.initialize_reaction_vector(extinctReactions)
-        #R = (self.S < 0)*1
-        #P = (self.S > 0)*1
-        R,P = self.create_RP_from_irreversible_network()
+        
+        R, P = self.create_RP_from_irreversible_network()
         b = sum(R)
 
         # sparsefy data
@@ -585,43 +737,49 @@ class GlobalMetabolicNetwork:
         b = csr_matrix(b)
         b = b.transpose()
 
-        #x0 = csr_matrix(x0)
-        #x0 = x0.transpose()
         xactive = csr_matrix(xactive).transpose()
         yactive = csr_matrix(yactive).transpose()
         yextinct = csr_matrix(yextinct).transpose()
-        # reun contraction algorithm
-        X,Y = netContract(R,P,b,xactive,yactive,yextinct)
+        
+        # run contraction algorithm
+        X, Y = netContract(R, P, b, xactive, yactive, yextinct)
         x = X[-1]
         y = Y[-1]
 
-        # convert to list of metabolite ids and reaction ids
-        if x.toarray().sum() > 0:
-            cidx = np.nonzero(x.toarray().T[0])[0]
-            compounds = [self.idx_to_cid[i] for i in cidx]
-        else:
-            compounds = []
-            
-        if y.toarray().sum() > 0:
-            ridx = np.nonzero(y.toarray().T[0])[0]
-            reactions = [self.idx_to_rid[i] for i in ridx]
-        else:
-            reactions = [];
-            
-        return compounds,reactions
+        compounds = self._x_to_compounds(x)
+        reactions = self._y_to_reactions(y)
+        return compounds, reactions
 
-    def run_expansions(self,seedSets,algorithm='naive'):
-        # constructre network from skinny table and create matricies for NE algorithm
-        # if (self.rid_to_idx is None) or (self.idx_to_rid is None):
-        self.rid_to_idx, self.idx_to_rid = self.create_reaction_dicts()
-        # if (self.cid_to_idx is None) or (self.idx_to_cid is None):
-        self.cid_to_idx, self.idx_to_cid = self.create_compound_dicts()
-        # if self.S is None:
-        #self.S = self.create_S_from_irreversible_network()
+    def run_expansions(self, seedSets, algorithm='naive'):
+        """
+        Run expansion for multiple seed sets.
         
-        #R = (self.S < 0)*1
-        #P = (self.S > 0)*1
-        R,P = self.create_RP_from_irreversible_network()
+        Args:
+            seedSets: List of seed sets (each is a list of compound IDs)
+            algorithm: 'naive' or 'trace'
+        
+        Returns:
+            (compoundScopes, reactionScopes) - lists of results for each seed set
+        """
+        # For naive algorithm with Rust, we can use the optimized single expansion
+        # A future optimization could batch these in Rust
+        if _HAS_RUST and algorithm.lower() == 'naive':
+            self._ensure_rust_ready()
+            compoundScopes = []
+            reactionScopes = []
+            for seedSet in seedSets:
+                compounds, reactions = self._expand_rust(seedSet, reaction_mask=None)
+                compoundScopes.append(compounds)
+                reactionScopes.append(reactions)
+            return compoundScopes, reactionScopes
+        else:
+            return self._run_expansions_python(seedSets, algorithm)
+    
+    def _run_expansions_python(self, seedSets, algorithm='naive'):
+        """Pure Python batch expansion."""
+        self._ensure_dicts()
+        
+        R, P = self.create_RP_from_irreversible_network()
         b = sum(R)
 
         # sparsefy data
@@ -636,50 +794,84 @@ class GlobalMetabolicNetwork:
             x0 = self.initialize_metabolite_vector(seedSet)
             x0 = csr_matrix(x0)
             x0 = x0.transpose()
-            x,y = netExp(R,P,x0,b)
             
             if algorithm.lower() == 'naive':
-                x,y = netExp(R,P,x0,b)
-                if x.toarray().sum() > 0:
-                    cidx = np.nonzero(x.toarray().T[0])[0]
-                    compounds = [self.idx_to_cid[i] for i in cidx]
-                else:
-                    compounds = []
-                
-                if y.toarray().sum() > 0:
-                    ridx = np.nonzero(y.toarray().T[0])[0]
-                    reactions = [self.idx_to_rid[i] for i in ridx]
-                else:
-                    reactions = [];
-                
+                x, y = netExp(R, P, x0, b)
+                compounds = self._x_to_compounds(x)
+                reactions = self._y_to_reactions(y)
             elif algorithm.lower() == 'trace':
-                X,Y = netExp_trace(R,P,x0,b)
-                compounds = self.create_iteration_dict(X,self.idx_to_cid)
-                reactions = self.create_iteration_dict(Y,self.idx_to_rid)
+                X, Y = netExp_trace(R, P, x0, b)
+                compounds = self.create_iteration_dict(X, self.idx_to_cid)
+                reactions = self.create_iteration_dict(Y, self.idx_to_rid)
             else:
-                    raise ValueError('please define algorithm (trace or naive)')
+                raise ValueError('please define algorithm (trace or naive)')
 
             compoundScopes.append(compounds)
             reactionScopes.append(reactions)
-        return compoundScopes,reactionScopes
+        return compoundScopes, reactionScopes
 
-    def run_contractions(self,seedSet,reactionScope,compoundScope,extinctReactionSets):
-        # constructre network from skinny table and create matricies for NC algorithm
-        # if (self.rid_to_idx is None) or (self.idx_to_rid is None):
-
-        self.rid_to_idx, self.idx_to_rid = self.create_reaction_dicts()
-        # if (self.cid_to_idx is None) or (self.idx_to_cid is None):
-        self.cid_to_idx, self.idx_to_cid = self.create_compound_dicts()
-        # if self.S is None:
-        #self.S = self.create_S_from_irreversible_network()
+    def run_contractions(self, seedSet, reactionScope, compoundScope, extinctReactionSets):
+        """
+        Run contraction for multiple extinction sets.
+        
+        Args:
+            seedSet: Original seed set (unused, kept for API compatibility)
+            reactionScope: List of reaction IDs in the current scope
+            compoundScope: List of compound IDs in the current scope
+            extinctReactionSets: List of extinction sets (each is a list of reaction IDs to remove)
+        
+        Returns:
+            (compoundScopes, reactionScopes) - lists of results for each extinction set
+        """
+        if _HAS_RUST:
+            return self._run_contractions_rust(reactionScope, compoundScope, extinctReactionSets)
+        else:
+            return self._run_contractions_python(reactionScope, compoundScope, extinctReactionSets)
+    
+    def _run_contractions_rust(self, reactionScope, compoundScope, extinctReactionSets):
+        """Rust-accelerated batch contraction."""
+        self._ensure_rust_ready()
+        ra = self._rust_arrays
+        
+        # Convert scope to arrays (shared across all contractions)
+        x_active = self.initialize_metabolite_vector(compoundScope).astype(np.uint8)
+        y_active = self.initialize_reaction_vector(reactionScope).astype(np.uint8)
+        
+        # Build batch extinction matrix
+        n_batches = len(extinctReactionSets)
+        y_extinct_batch = np.zeros((n_batches, ra['n_reactions']), dtype=np.uint8)
+        for i, extinctReactions in enumerate(extinctReactionSets):
+            for rid in extinctReactions:
+                if rid in self.rid_to_idx:
+                    y_extinct_batch[i, self.rid_to_idx[rid]] = 1
+        
+        # Single Rust call for all contractions
+        x_batch, y_batch = netexprs.contract_batch(
+            ra['rt_data'], ra['rt_indices'], ra['rt_indptr'], ra['n_reactions'],
+            ra['p_data'], ra['p_indices'], ra['p_indptr'], ra['n_compounds'],
+            x_active, y_active, y_extinct_batch
+        )
+        
+        # Convert outputs
+        compoundScopes = []
+        reactionScopes = []
+        for i in range(n_batches):
+            compounds = self._x_to_compounds(x_batch[i])
+            reactions = self._y_to_reactions(y_batch[i])
+            compoundScopes.append(compounds)
+            reactionScopes.append(reactions)
+        
+        return compoundScopes, reactionScopes
+    
+    def _run_contractions_python(self, reactionScope, compoundScope, extinctReactionSets):
+        """Pure Python batch contraction."""
+        self._ensure_dicts()
         
         # create vectors for reactionScope, compoundScope
         xactive = self.initialize_metabolite_vector(compoundScope)
         yactive = self.initialize_reaction_vector(reactionScope)
         
-        #R = (self.S < 0)*1
-        #P = (self.S > 0)*1
-        R,P = self.create_RP_from_irreversible_network()
+        R, P = self.create_RP_from_irreversible_network()
         b = sum(R)
 
         # sparsefy data
@@ -688,11 +880,8 @@ class GlobalMetabolicNetwork:
         b = csr_matrix(b)
         b = b.transpose()
 
-        #x0 = csr_matrix(x0)
-        #x0 = x0.transpose()
         xactive = csr_matrix(xactive).transpose()
         yactive = csr_matrix(yactive).transpose()
-     
 
         compoundScopes = []
         reactionScopes = []
@@ -701,29 +890,74 @@ class GlobalMetabolicNetwork:
             yextinct = self.initialize_reaction_vector(extinctReactions)
             yextinct = csr_matrix(yextinct).transpose()
             # run contraction algorithm
-            X,Y = netContract(R,P,b,xactive,yactive,yextinct)
+            X, Y = netContract(R, P, b, xactive, yactive, yextinct)
             x = X[-1]
-            y = Y[-1]            
-            if x.toarray().sum() > 0:
-                cidx = np.nonzero(x.toarray().T[0])[0]
-                compounds = [self.idx_to_cid[i] for i in cidx]
-            else:
-                compounds = []
-                
-            if y.toarray().sum() > 0:
-                ridx = np.nonzero(y.toarray().T[0])[0]
-                reactions = [self.idx_to_rid[i] for i in ridx]
-            else:
-                reactions = [];
+            y = Y[-1]
+            
+            compounds = self._x_to_compounds(x)
+            reactions = self._y_to_reactions(y)
             compoundScopes.append(compounds)
             reactionScopes.append(reactions)
         
-        return compoundScopes,reactionScopes
+        return compoundScopes, reactionScopes
 
 
-    def run_expansions_reactionMasks(self,seedSet,maskedReactionSets):
-        # run many expansions, but masking with reaction list in the lists maskedReactionSets
-        R,P = self.create_RP_from_irreversible_network()
+    def run_expansions_reactionMasks(self, seedSet, maskedReactionSets):
+        """
+        Run masked expansions (reactions removed from network).
+        
+        Args:
+            seedSet: List of compound IDs to start expansion from
+            maskedReactionSets: List of reaction sets to REMOVE (each is a list of reaction IDs)
+        
+        Returns:
+            (compoundScopes, reactionScopes) - lists of results for each mask
+        """
+        if _HAS_RUST:
+            return self._run_expansions_reactionMasks_rust(seedSet, maskedReactionSets)
+        else:
+            return self._run_expansions_reactionMasks_python(seedSet, maskedReactionSets)
+    
+    def _run_expansions_reactionMasks_rust(self, seedSet, maskedReactionSets):
+        """Rust-accelerated batch masked expansion."""
+        self._ensure_rust_ready()
+        ra = self._rust_arrays
+        
+        # Convert seedSet to x0 array (shared across all expansions)
+        x0 = self.initialize_metabolite_vector(seedSet).astype(np.uint8)
+        
+        # Build batch mask matrix
+        # maskedReactionSets contains reactions to REMOVE, so mask = 1 - removed
+        n_masks = len(maskedReactionSets)
+        masks = np.ones((n_masks, ra['n_reactions']), dtype=np.uint8)
+        for i, rxns_removed in enumerate(maskedReactionSets):
+            for rid in rxns_removed:
+                if rid in self.rid_to_idx:
+                    masks[i, self.rid_to_idx[rid]] = 0
+        
+        # Single Rust call for all expansions
+        x_batch, y_batch = netexprs.expand_masked_batch(
+            ra['rt_data'], ra['rt_indices'], ra['rt_indptr'], ra['n_reactions'],
+            ra['p_data'], ra['p_indices'], ra['p_indptr'], ra['n_compounds'],
+            x0, ra['b'], masks
+        )
+        
+        # Convert outputs
+        compoundScopes = []
+        reactionScopes = []
+        for i in range(n_masks):
+            compounds = self._x_to_compounds(x_batch[i])
+            reactions = self._y_to_reactions(y_batch[i])
+            compoundScopes.append(compounds)
+            reactionScopes.append(reactions)
+        
+        return compoundScopes, reactionScopes
+    
+    def _run_expansions_reactionMasks_python(self, seedSet, maskedReactionSets):
+        """Pure Python batch masked expansion."""
+        self._ensure_dicts()
+        
+        R, P = self.create_RP_from_irreversible_network()
         b = sum(R)
         # sparsefy data
         R = csr_matrix(R)
@@ -739,29 +973,20 @@ class GlobalMetabolicNetwork:
         reactionScopes = []
 
         for rxns_removed in maskedReactionSets:
-            # build new R and P matricies with Masks
+            # build new R and P matrices with Masks
             yextinct = self.initialize_reaction_vector(rxns_removed)
-            reaction_mask = csr_matrix(np.diag(1-yextinct))
-            Pstar = P*reaction_mask
-            Rstar = R*reaction_mask
-            # run contraction algorithm
-            x,y = netExp(Rstar,Pstar,x0,b)
+            reaction_mask = csr_matrix(np.diag(1 - yextinct))
+            Pstar = P * reaction_mask
+            Rstar = R * reaction_mask
+            # run expansion algorithm
+            x, y = netExp(Rstar, Pstar, x0, b)
 
-            if x.toarray().sum() > 0:
-                cidx = np.nonzero(x.toarray().T[0])[0]
-                compounds = [self.idx_to_cid[i] for i in cidx]
-            else:
-                compounds = []
-                
-            if y.toarray().sum() > 0:
-                ridx = np.nonzero(y.toarray().T[0])[0]
-                reactions = [self.idx_to_rid[i] for i in ridx]
-            else:
-                reactions = [];
+            compounds = self._x_to_compounds(x)
+            reactions = self._y_to_reactions(y)
             compoundScopes.append(compounds)
             reactionScopes.append(reactions)
         
-        return compoundScopes,reactionScopes
+        return compoundScopes, reactionScopes
 
 
     def ne_output_to_graph(self,cpds,rxns):
@@ -804,10 +1029,32 @@ class GlobalMetabolicNetwork:
         return rn_list_tuple
 
 
-
     def run_expansions_parallel(self, seedSets, algorithm='naive'):
-        self.rid_to_idx, self.idx_to_rid = self.create_reaction_dicts()
-        self.cid_to_idx, self.idx_to_cid = self.create_compound_dicts()
+        """
+        Run expansion for multiple seed sets in parallel.
+        
+        Note: When Rust acceleration is available, this delegates to run_expansions()
+        which uses Rust's native parallelization (Rayon). The _parallel suffix is kept
+        for API compatibility.
+        
+        Args:
+            seedSets: List of seed sets (each is a list of compound IDs)
+            algorithm: 'naive' or 'trace'
+        
+        Returns:
+            (compoundScopes, reactionScopes) - lists of results for each seed set
+        """
+        if _HAS_RUST and algorithm.lower() == 'naive':
+            # Rust handles parallelization internally
+            return self.run_expansions(seedSets, algorithm)
+        else:
+            # Fall back to Python multiprocessing
+            return self._run_expansions_parallel_python(seedSets, algorithm)
+    
+    def _run_expansions_parallel_python(self, seedSets, algorithm='naive'):
+        """Python multiprocessing-based parallel expansion."""
+        self._ensure_dicts()
+        
         R, P = self.create_RP_from_irreversible_network()
         b = np.sum(R, axis=0)
 
@@ -819,10 +1066,8 @@ class GlobalMetabolicNetwork:
         compoundScopes = []
         reactionScopes = []
 
-        #with ProcessPoolExecutor() as executor:
         with ProcessPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
-
-            results = executor.map(expansion_helper, [(self,seedSet, algorithm, R, P, b) for seedSet in seedSets])
+            results = executor.map(expansion_helper, [(self, seedSet, algorithm, R, P, b) for seedSet in seedSets])
 
         for compounds, reactions in results:
             compoundScopes.append(compounds)
@@ -832,6 +1077,31 @@ class GlobalMetabolicNetwork:
 
 
     def run_expansions_reactionMasks_parallel(self, seedSet, maskedReactionSets):
+        """
+        Run masked expansions in parallel.
+        
+        Note: When Rust acceleration is available, this delegates to run_expansions_reactionMasks()
+        which uses Rust's native parallelization (Rayon). The _parallel suffix is kept
+        for API compatibility.
+        
+        Args:
+            seedSet: List of compound IDs to start expansion from
+            maskedReactionSets: List of reaction sets to REMOVE
+        
+        Returns:
+            (compoundScopes, reactionScopes) - lists of results for each mask
+        """
+        if _HAS_RUST:
+            # Rust handles parallelization internally
+            return self.run_expansions_reactionMasks(seedSet, maskedReactionSets)
+        else:
+            # Fall back to Python multiprocessing
+            return self._run_expansions_reactionMasks_parallel_python(seedSet, maskedReactionSets)
+    
+    def _run_expansions_reactionMasks_parallel_python(self, seedSet, maskedReactionSets):
+        """Python multiprocessing-based parallel masked expansion."""
+        self._ensure_dicts()
+        
         R, P = self.create_RP_from_irreversible_network()
         b = np.sum(R, axis=0)
 
@@ -910,6 +1180,3 @@ def expansion_helper_reaction_masks(args):
         reactions = []
 
     return compounds, reactions
-
-
-    
