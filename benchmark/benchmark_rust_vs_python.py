@@ -18,12 +18,6 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 
 RESULTS_FILE = os.path.join(current_dir, "benchmark_results.json")
 
-def load_metabolism(fname):
-    return pd.read_pickle(ne.asset_path  + "/metabolic_networks/" + fname)
-
-def load_compounds(fname):
-    return pd.read_csv(ne.asset_path  + "/compounds/" + fname)
-
 def load_results():
     if os.path.exists(RESULTS_FILE):
         with open(RESULTS_FILE, "r") as f:
@@ -55,8 +49,8 @@ def benchmark(fn, args, n_runs=10, warmup=2):
 def run_benchmarks():
     # Load data
     print("Loading data...")
-    kegg = load_metabolism("metabolism.v8.01May2023.pkl")
-    seedSet = list(set(load_compounds('seeds.Goldford2022.csv')["ID"]))
+    kegg = ne.load_metabolism("metabolism.v8.01May2023.pkl")
+    seedSet = list(set(ne.load_compounds('seeds.Goldford2022.csv')["ID"]))
     
     kegg.rid_to_idx, kegg.idx_to_rid = kegg.create_reaction_dicts()
     kegg.cid_to_idx, kegg.idx_to_cid = kegg.create_compound_dicts()

@@ -20,6 +20,13 @@ except ImportError:
 asset_path,filename = os.path.split(os.path.abspath(__file__))
 asset_path = asset_path + '/assets'
 
+def load_metabolism(fname):
+    return pd.read_pickle(ne.asset_path  + "/metabolic_networks/" + fname)
+
+def load_compounds(fname):
+    return pd.read_csv(ne.asset_path  + "/compounds/" + fname)
+
+
 def netExp(R,P,x,b):
     k = np.sum(x);
     k0 = 0;
