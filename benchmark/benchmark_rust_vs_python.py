@@ -109,12 +109,13 @@ def run_benchmarks():
     print("Benchmarking single masked expansion...")
     np.random.seed(42)
     mask = (np.random.random(n_reactions) > 0.1).astype(np.uint8)
-    reaction_mask_matrix = csr_matrix(np.diag(mask))
-    Rstar = R * reaction_mask_matrix
-    Pstar = P * reaction_mask_matrix
     
     results["benchmarks"]["expand_masked_python"] = benchmark(
-        lambda: ne.netExp(Rstar, Pstar, x0_sparse, b_sparse),
+        lambda: ne.netExp(
+            R * csr_matrix(np.diag(mask)), 
+            P * csr_matrix(np.diag(mask)), 
+            x0_sparse, b_sparse
+        ),
         [],
         n_runs=10
     )
@@ -130,7 +131,7 @@ def run_benchmarks():
     )
 
     # --- Benchmark 3: Batch Masked Expansion ---
-    for n_masks in [9]:
+    for n_masks in [10]:
         print(f"Benchmarking batch masked expansion (n={n_masks})...")
         
         np.random.seed(123)
@@ -199,7 +200,7 @@ def run_benchmarks():
     )
     
     # --- Benchmark 5: Batch Contraction ---
-    for n_batches in [9]:
+    for n_batches in [10]:
         print(f"Benchmarking batch contraction (n={n_batches})...")
         
         np.random.seed(999)
