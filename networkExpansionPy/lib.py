@@ -21,10 +21,10 @@ asset_path,filename = os.path.split(os.path.abspath(__file__))
 asset_path = asset_path + '/assets'
 
 def load_metabolism(fname):
-    return pd.read_pickle(ne.asset_path  + "/metabolic_networks/" + fname)
+    return pd.read_pickle(asset_path  + "/metabolic_networks/" + fname)
 
 def load_compounds(fname):
-    return pd.read_csv(ne.asset_path  + "/compounds/" + fname)
+    return pd.read_csv(asset_path  + "/compounds/" + fname)
 
 
 def netExp(R,P,x,b):
@@ -226,7 +226,7 @@ class GlobalMetabolicNetwork:
             network = pd.read_csv(asset_path + '/KEGG/network_full.csv')
             cpds = pd.read_csv(asset_path +'/compounds/cpds.txt',sep='\t')
             thermo = pd.read_csv(asset_path +'/reaction_free_energy/kegg_reactions_CC_ph7.0.csv',sep=',')
-            self.network = network
+            self._network = network
             self.thermo = thermo
             self.compounds = cpds ## Includes many compounds without reactions
             
@@ -235,21 +235,21 @@ class GlobalMetabolicNetwork:
             with open(os.path.join(asset_path,"ecg","master_from_kegg_2021-01-05.json")) as f:
                 ecg = json.load(f)
             network, consistent_rxns = load_ecg_network(ecg)
-            self.network = network
+            self._network = network
             self.consistent_rxns = consistent_rxns
-            self.compounds = pd.DataFrame(self.network["cid"].unique(),columns=["cid"]) ## Only includes compounds with reactions
+            self.compounds = pd.DataFrame(network["cid"].unique(),columns=["cid"]) ## Only includes compounds with reactions
 
         elif metabolism == "KEGG":
             with zipfile.ZipFile(os.path.join(asset_path,"KEGG","2021.05.31-18.06.52","entries_detailed","reaction.json.zip"),"r") as z:
                 rdict = json.loads(z.read(z.infolist()[0]).decode())
             network, consistent_rxns = load_json_network(rdict)
-            self.network = network
+            self._network = network
             self.consistent_rxns = consistent_rxns
-            self.compounds = pd.DataFrame(self.network["cid"].unique(),columns=["cid"]) ## Only includes compounds with reactions
+            self.compounds = pd.DataFrame(network["cid"].unique(),columns=["cid"]) ## Only includes compounds with reactions
 
         elif metabolism == "dev":
             ## Just for testing, etc.
-            self.network = None
+            self._network = None
 
         else:
             raise(ValueError("'metabolism' must be one of 'KEGG_OG, 'ecg', 'KEGG'"))
@@ -263,6 +263,19 @@ class GlobalMetabolicNetwork:
         self.idx_to_cid = None
         self.S = None
         self._rust_arrays = None  # Lazily initialized cache for Rust arrays
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # Ensure we save as _network
+        if 'network' in state and '_network' not in state:
+            state['_network'] = state.pop('network')
+        return state
+
+    def __setstate__(self, state):
+        # Handle old pickles that have 'network' instead of '_network'
+        if 'network' in state and '_network' not in state:
+            state['_network'] = state.pop('network')
+        self.__dict__.update(state)
 
     @property
     def network(self):
