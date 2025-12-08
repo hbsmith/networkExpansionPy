@@ -256,6 +256,15 @@ class GlobalMetabolicNetwork:
         self.idx_to_cid = None
         self.S = None
         self._rust_arrays = None  # Lazily initialized cache for Rust arrays
+
+    @property
+    def network(self):
+        return self._network
+
+    @network.setter
+    def network(self, value):
+        self._network = value
+        self._invalidate_rust_cache()
         
     def _ensure_dicts(self):
         """Ensure compound and reaction dictionaries are initialized."""
