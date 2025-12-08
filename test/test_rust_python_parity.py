@@ -1,7 +1,3 @@
-# import warnings
-# from scipy.sparse import SparseEfficiencyWarning
-# warnings.filterwarnings('ignore', category=SparseEfficiencyWarning)
-
 import unittest
 import numpy as np
 from scipy.sparse import csr_matrix
