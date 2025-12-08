@@ -615,7 +615,7 @@ class GlobalMetabolicNetwork:
         Args:
             seedSet: List of compound IDs to start expansion from
             algorithm: 'naive', 'cr', 'trace', or 'step'
-            reaction_mask: Optional list of reaction IDs to include (others are masked out)
+            reaction_mask: Optional list of reaction IDs to exclude (remove from network)
         
         Returns:
             For 'naive', 'cr', 'step': (compounds, reactions) - lists of IDs in scope
@@ -628,26 +628,25 @@ class GlobalMetabolicNetwork:
             return self._expand_python(seedSet, algorithm, reaction_mask)
     
     def _expand_rust(self, seedSet, reaction_mask=None):
-        """Rust-accelerated expansion (naive algorithm only)."""
+        """Rust-accelerated expansion (naive algorithm only).
+        
+        Args:
+            seedSet: List of compound IDs to start expansion from
+            reaction_mask: Optional list of reaction IDs to EXCLUDE (remove from network)
+        """
         self._ensure_rust_ready()
         ra = self._rust_arrays
         
         # Convert seedSet to x0 array
         x0 = self.initialize_metabolite_vector(seedSet).astype(np.uint8)
         
-        if reaction_mask is not None:
-            # Build mask array: 1 for allowed reactions, 0 for masked
+        if reaction_mask is not None and len(reaction_mask) > 0:
+            # Build mask array: 1 for allowed reactions, 0 for excluded
+            # reaction_mask contains reactions to EXCLUDE
             mask = np.ones(ra['n_reactions'], dtype=np.uint8)
             for rid in reaction_mask:
                 if rid in self.rid_to_idx:
-                    # reaction_mask contains reactions to KEEP, so we don't zero them
-                    pass
-            # Actually, reaction_mask semantics: it's a list of reactions to INCLUDE
-            # So we need to zero out everything NOT in the mask
-            mask = np.zeros(ra['n_reactions'], dtype=np.uint8)
-            for rid in reaction_mask:
-                if rid in self.rid_to_idx:
-                    mask[self.rid_to_idx[rid]] = 1
+                    mask[self.rid_to_idx[rid]] = 0
             
             x_arr, y_arr = netexprs.expand_masked(
                 ra['rt_data'], ra['rt_indices'], ra['rt_indptr'], ra['n_reactions'],
@@ -666,7 +665,13 @@ class GlobalMetabolicNetwork:
         return compounds, reactions
     
     def _expand_python(self, seedSet, algorithm='naive', reaction_mask=None):
-        """Pure Python expansion (supports all algorithms)."""
+        """Pure Python expansion (supports all algorithms).
+        
+        Args:
+            seedSet: List of compound IDs to start expansion from
+            algorithm: 'naive', 'cr', 'trace', or 'step'
+            reaction_mask: Optional list of reaction IDs to EXCLUDE (remove from network)
+        """
         self._ensure_dicts()
         
         x0 = self.initialize_metabolite_vector(seedSet)
@@ -679,10 +684,13 @@ class GlobalMetabolicNetwork:
         b = csr_matrix(b)
         b = b.transpose()
 
-        # add a new term that uses sparse matrix multiplication for R and P to zero out reactions that are not accessible
-        if reaction_mask is not None:
-            reaction_mask_vec = self.initialize_reaction_vector(reaction_mask)
-            reaction_mask_mat = csr_matrix(np.diag(reaction_mask_vec))
+        # Mask out excluded reactions (reaction_mask contains reactions to EXCLUDE)
+        if reaction_mask is not None and len(reaction_mask) > 0:
+            # Create vector with 1s for reactions to EXCLUDE
+            exclude_vec = self.initialize_reaction_vector(reaction_mask)
+            # Invert to get 1s for reactions to KEEP
+            keep_vec = 1 - exclude_vec
+            reaction_mask_mat = csr_matrix(np.diag(keep_vec))
             P = P * reaction_mask_mat
             R = R * reaction_mask_mat
 
