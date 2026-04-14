@@ -639,13 +639,32 @@ class GlobalMetabolicNetwork:
             return x0
 
     def initialize_reaction_vector(self, reactionSet):
+        """Build a binary reaction indicator vector.
+
+        Accepts reaction IDs in either representation:
+        - Tuple form:  (rn_id, direction)  e.g. ("R00001", "forward")
+        - String form: plain rn_id          e.g. "R00001"
+            When a plain string is given, BOTH directed copies
+            (forward and reverse) are set to 1.
+
+        Tuple keys are tried first; unmatched items are retried as
+        plain-string IDs expanded to both directions.
+        """
         if reactionSet is None:
             print("No reactions in set")
-        else:
-            x0 = np.zeros([len(self.rid_to_idx)], dtype=int)
-            for x in set(reactionSet) & set(self.rid_to_idx.keys()):
-                x0[self.rid_to_idx[x]] = 1
-            return x0
+            return
+        x0 = np.zeros([len(self.rid_to_idx)], dtype=int)
+        for rid in reactionSet:
+            if rid in self.rid_to_idx:
+                # exact match — tuple or any future string-keyed network
+                x0[self.rid_to_idx[rid]] = 1
+            else:
+                # plain string → expand to both directed copies
+                for direction in ("forward", "reverse"):
+                    key = (rid, direction)
+                    if key in self.rid_to_idx:
+                        x0[self.rid_to_idx[key]] = 1
+        return x0
 
     def create_reaction_dicts(self):
         rids = set(zip(self.network["rn"], self.network["direction"]))
@@ -761,10 +780,10 @@ class GlobalMetabolicNetwork:
         if reaction_mask is not None and len(reaction_mask) > 0:
             # Build mask array: 1 for allowed reactions, 0 for excluded
             # reaction_mask contains reactions to EXCLUDE
-            mask = np.ones(ra["n_reactions"], dtype=np.uint8)
-            for rid in reaction_mask:
-                if rid in self.rid_to_idx:
-                    mask[self.rid_to_idx[rid]] = 0
+            # Delegate to initialize_reaction_vector so string and tuple IDs
+            # are both handled consistently.
+            exclude_vec = self.initialize_reaction_vector(reaction_mask).astype(np.uint8)
+            mask = (1 - exclude_vec).astype(np.uint8)
 
             x_arr, y_arr = netexprs.expand_masked(
                 ra["rt_data"],
