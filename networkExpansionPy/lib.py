@@ -1048,9 +1048,7 @@ class GlobalMetabolicNetwork:
         n_batches = len(extinctReactionSets)
         y_extinct_batch = np.zeros((n_batches, ra["n_reactions"]), dtype=np.uint8)
         for i, extinctReactions in enumerate(extinctReactionSets):
-            for rid in extinctReactions:
-                if rid in self.rid_to_idx:
-                    y_extinct_batch[i, self.rid_to_idx[rid]] = 1
+            y_extinct_batch[i] = self.initialize_reaction_vector(extinctReactions).astype(np.uint8)
 
         # Single Rust call for all contractions
         x_batch, y_batch = netexprs.contract_batch(
@@ -1150,9 +1148,8 @@ class GlobalMetabolicNetwork:
         n_masks = len(maskedReactionSets)
         masks = np.ones((n_masks, ra["n_reactions"]), dtype=np.uint8)
         for i, rxns_removed in enumerate(maskedReactionSets):
-            for rid in rxns_removed:
-                if rid in self.rid_to_idx:
-                    masks[i, self.rid_to_idx[rid]] = 0
+            exclude_vec = self.initialize_reaction_vector(rxns_removed).astype(np.uint8)
+            masks[i] = 1 - exclude_vec
 
         # Single Rust call for all expansions
         x_batch, y_batch = netexprs.expand_masked_batch(
@@ -1201,8 +1198,8 @@ class GlobalMetabolicNetwork:
 
         for rxns_removed in maskedReactionSets:
             # build new R and P matrices with Masks
-            yextinct = self.initialize_reaction_vector(rxns_removed)
-            reaction_mask = csr_matrix(np.diag(1 - yextinct))
+            exclude_vec = self.initialize_reaction_vector(rxns_removed)
+            reaction_mask = csr_matrix(np.diag(1 - exclude_vec))
             Pstar = P * reaction_mask
             Rstar = R * reaction_mask
             # run expansion algorithm
@@ -1408,8 +1405,8 @@ def expansion_helper_reaction_masks(args):
     x0 = csr_matrix(x0)
     x0 = x0.transpose()
 
-    yextinct = instance.initialize_reaction_vector(rxns_removed)
-    reaction_mask = csr_matrix(np.diag(1 - yextinct))
+    exclude_vec = instance.initialize_reaction_vector(rxns_removed)
+    reaction_mask = csr_matrix(np.diag(1 - exclude_vec))
     Pstar = P * reaction_mask
     Rstar = R * reaction_mask
 
