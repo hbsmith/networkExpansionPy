@@ -238,6 +238,48 @@ def _load_tuple_network(tlist):
 
 
 class GlobalMetabolicNetwork:
+    """A metabolic network supporting expansion and contraction algorithms.
+
+    Metabolic networks are loaded from a named database (default: "KEGG_OG")
+    and typically prepared with::
+
+        net = GlobalMetabolicNetwork()
+        net.pruneInconsistentReactions()
+        net.convertToIrreversible()
+
+    After ``convertToIrreversible()``, each reaction is split into directed
+    copies and indexed internally as ``(rn_id, direction)`` tuples, e.g.
+    ``("R00001", "forward")``.
+
+    **Reaction ID conventions**
+
+    All public methods that accept reaction ID sets (``reaction_mask``,
+    ``extinctReactions``, ``reactionScope``, etc.) accept either form:
+
+    - Tuple: ``(rn_id, direction)`` — targets one directed copy
+    - String: plain ``rn_id`` — targets both directed copies
+
+    Normalization is handled by ``initialize_reaction_vector()``.
+
+    **Internal vector conventions**
+
+    Binary reaction vectors use opposite sign conventions depending on context:
+
+    - Expansion *mask* vectors: ``1`` = reaction is **allowed**, ``0`` = excluded
+    - Contraction *extinct* vectors: ``1`` = reaction **is extinct**, ``0`` = active
+
+    The inversion between user-supplied ID sets (always "reactions to remove")
+    and internal mask vectors (1 = keep) happens once, inside
+    ``initialize_reaction_vector()``.
+
+    **Rust acceleration**
+
+    When ``netexprs`` is installed, compute-intensive methods automatically
+    dispatch to a Rust backend with Rayon-based parallelism. The ``trace``
+    algorithm always uses Python. Falls back to Python silently if
+    ``netexprs`` is unavailable.
+    """
+    
 
     def __init__(self, metabolism="KEGG_OG"):
         # load the data
