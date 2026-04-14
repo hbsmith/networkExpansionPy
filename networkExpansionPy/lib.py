@@ -790,51 +790,44 @@ class GlobalMetabolicNetwork:
 
         return id_iter
 
-    def expand(self, seedSet, algorithm="naive", reaction_mask=None):
+    def expand(self, seedSet, algorithm="naive", excluded_reactions=None):
         """
         Run network expansion from a seed set of compounds.
-
+ 
         Args:
             seedSet: List of compound IDs to start expansion from
             algorithm: 'naive', 'cr', 'trace', or 'step'
-            reaction_mask: Optional list of reaction IDs to exclude (remove from network)
-
+            excluded_reactions: Optional list of reaction IDs to remove from
+                the network before expanding. Accepts either tuple
+                (rn_id, direction) or plain string rn_id (both directed
+                copies are excluded). See initialize_reaction_vector().
+ 
         Returns:
             For 'naive', 'cr', 'step': (compounds, reactions) - lists of IDs in scope
             For 'trace': (compound_dict, reaction_dict) - dicts mapping ID to iteration
         """
-        # Use Rust for naive algorithm without trace
         if _HAS_RUST and algorithm.lower() == "naive":
             print("Using Rust backend")
-            return self._expand_rust(seedSet, reaction_mask)
+            return self._expand_rust(seedSet, excluded_reactions)
         else:
-            return self._expand_python(seedSet, algorithm, reaction_mask)
+            return self._expand_python(seedSet, algorithm, excluded_reactions)
 
-    def _expand_rust(self, seedSet, reaction_mask=None):
-        """Rust-accelerated expansion (naive algorithm only).
-
+    def _expand_rust(self, seedSet, excluded_reactions=None):
+        """Rust-accelerated network expansion (naive algorithm only).
+ 
         Internally uses a *keep* mask vector: 1 = reaction allowed, 0 = excluded.
-        The user-supplied ``reaction_mask`` (IDs to remove) is inverted once via
+        ``excluded_reactions`` (IDs to remove) is inverted once via
         ``initialize_reaction_vector()`` before being passed to Rust.
-
-        Args:
-            seedSet: List of compound IDs to start expansion from
-            reaction_mask: Optional list of reaction IDs to EXCLUDE (remove from network)
         """
         self._ensure_rust_ready()
         ra = self._rust_arrays
-
-        # Convert seedSet to x0 array
+ 
         x0 = self.initialize_metabolite_vector(seedSet).astype(np.uint8)
-
-        if reaction_mask is not None and len(reaction_mask) > 0:
-            # Build mask array: 1 for allowed reactions, 0 for excluded
-            # reaction_mask contains reactions to EXCLUDE
-            # Delegate to initialize_reaction_vector so string and tuple IDs
-            # are both handled consistently.
-            exclude_vec = self.initialize_reaction_vector(reaction_mask).astype(np.uint8)
+ 
+        if excluded_reactions is not None and len(excluded_reactions) > 0:
+            exclude_vec = self.initialize_reaction_vector(excluded_reactions).astype(np.uint8)
             mask = (1 - exclude_vec).astype(np.uint8)
-
+ 
             x_arr, y_arr = netexprs.expand_masked(
                 ra["rt_data"],
                 ra["rt_indices"],
@@ -861,44 +854,38 @@ class GlobalMetabolicNetwork:
                 x0,
                 ra["b"],
             )
-
+ 
         compounds = self._x_to_compounds(x_arr)
         reactions = self._y_to_reactions(y_arr)
         return compounds, reactions
 
-    def _expand_python(self, seedSet, algorithm="naive", reaction_mask=None):
+    def _expand_python(self, seedSet, algorithm="naive", excluded_reactions=None):
         """Pure Python expansion (supports all algorithms).
-
-        Args:
-            seedSet: List of compound IDs to start expansion from
-            algorithm: 'naive', 'cr', 'trace', or 'step'
-            reaction_mask: Optional list of reaction IDs to EXCLUDE (remove from network)
+ 
+        Internally uses a *keep* mask vector: 1 = reaction allowed, 0 = excluded.
+        ``excluded_reactions`` (IDs to remove) is inverted once via
+        ``initialize_reaction_vector()`` before being applied.
         """
         self._ensure_dicts()
-
+ 
         x0 = self.initialize_metabolite_vector(seedSet)
         R, P = self.create_RP_from_irreversible_network()
         b = sum(R)
-
-        # sparsefy data
+ 
         R = csr_matrix(R)
         P = csr_matrix(P)
         b = csr_matrix(b)
         b = b.transpose()
-
-        # Mask out excluded reactions (reaction_mask contains reactions to EXCLUDE)
-        if reaction_mask is not None and len(reaction_mask) > 0:
-            # Create vector with 1s for reactions to EXCLUDE
-            exclude_vec = self.initialize_reaction_vector(reaction_mask)
-            # Invert to get 1s for reactions to KEEP
-            keep_vec = 1 - exclude_vec
-            reaction_mask_mat = csr_matrix(np.diag(keep_vec))
-            P = P * reaction_mask_mat
-            R = R * reaction_mask_mat
-
+ 
+        if excluded_reactions is not None and len(excluded_reactions) > 0:
+            exclude_vec = self.initialize_reaction_vector(excluded_reactions)
+            mask = csr_matrix(np.diag(1 - exclude_vec))
+            P = P * mask
+            R = R * mask
+ 
         x0 = csr_matrix(x0)
         x0 = x0.transpose()
-
+ 
         if algorithm.lower() == "naive":
             x, y = netExp(R, P, x0, b)
         elif algorithm.lower() == "cr":
@@ -911,7 +898,7 @@ class GlobalMetabolicNetwork:
             raise ValueError(
                 "algorithm needs to be naive (compound stopping criteria) or cr (reaction/compound stopping criteria)"
             )
-
+ 
         if algorithm.lower() == "trace":
             compound_iteration_dict = self.create_iteration_dict(X, self.idx_to_cid)
             reaction_iteration_dict = self.create_iteration_dict(Y, self.idx_to_rid)
@@ -1018,7 +1005,7 @@ class GlobalMetabolicNetwork:
             compoundScopes = []
             reactionScopes = []
             for seedSet in seedSets:
-                compounds, reactions = self._expand_rust(seedSet, reaction_mask=None)
+                compounds, reactions = self._expand_rust(seedSet, excluded_reactions=None)
                 compoundScopes.append(compounds)
                 reactionScopes.append(reactions)
             return compoundScopes, reactionScopes
@@ -1086,7 +1073,13 @@ class GlobalMetabolicNetwork:
             )
 
     def _run_contractions_rust(self, reactionScope, compoundScope, extinctReactionSets):
-        """Rust-accelerated batch contraction."""
+        """Rust-accelerated batch contraction.
+
+        Builds a (n_batches × n_reactions) matrix of *extinct* vectors:
+        1 = reaction is extinct, 0 = active. Note the opposite sign convention
+        from expansion mask vectors — no inversion is applied here.
+        ``initialize_reaction_vector()`` is used directly.
+        """
         self._ensure_rust_ready()
         ra = self._rust_arrays
 
@@ -1186,7 +1179,13 @@ class GlobalMetabolicNetwork:
             )
 
     def _run_expansions_reactionMasks_rust(self, seedSet, maskedReactionSets):
-        """Rust-accelerated batch masked expansion."""
+        """Rust-accelerated batch masked expansion.
+
+        Builds a (n_masks × n_reactions) matrix of *keep* mask vectors:
+        1 = reaction allowed, 0 = excluded. Each row corresponds to one entry in
+        ``maskedReactionSets`` (IDs to remove), inverted via
+        ``initialize_reaction_vector()``.
+        """
         self._ensure_rust_ready()
         ra = self._rust_arrays
 
