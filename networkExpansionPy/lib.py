@@ -681,16 +681,20 @@ class GlobalMetabolicNetwork:
             return x0
 
     def initialize_reaction_vector(self, reactionSet):
-        """Build a binary reaction indicator vector.
+        """Build a binary reaction indicator vector from a set of reaction IDs.
 
-        Accepts reaction IDs in either representation:
-        - Tuple form:  (rn_id, direction)  e.g. ("R00001", "forward")
-        - String form: plain rn_id          e.g. "R00001"
-            When a plain string is given, BOTH directed copies
-            (forward and reverse) are set to 1.
+        This is the single normalization gateway for all reaction ID sets entering
+        the library. Accepts either ID representation:
 
-        Tuple keys are tried first; unmatched items are retried as
-        plain-string IDs expanded to both directions.
+        - Tuple ``(rn_id, direction)`` — sets that one directed copy to 1
+        - String ``rn_id`` — sets both directed copies (forward and reverse) to 1
+
+        Tuple keys are tried first; unmatched items are retried as plain string
+        IDs expanded to both directions. Unknown IDs are silently ignored.
+
+        Returns a vector of length ``n_reactions`` with dtype int, where 1
+        indicates membership. The semantic meaning of that 1 (allowed, extinct,
+        in-scope, etc.) is determined by the caller.
         """
         if reactionSet is None:
             print("No reactions in set")
@@ -808,6 +812,10 @@ class GlobalMetabolicNetwork:
 
     def _expand_rust(self, seedSet, reaction_mask=None):
         """Rust-accelerated expansion (naive algorithm only).
+
+        Internally uses a *keep* mask vector: 1 = reaction allowed, 0 = excluded.
+        The user-supplied ``reaction_mask`` (IDs to remove) is inverted once via
+        ``initialize_reaction_vector()`` before being passed to Rust.
 
         Args:
             seedSet: List of compound IDs to start expansion from
