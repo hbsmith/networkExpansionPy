@@ -18,6 +18,14 @@ try:
 except ImportError:
     _HAS_RUST = False
 
+_rust_announced = False
+
+def _announce_rust():
+    global _rust_announced
+    if not _rust_announced:
+        print("🦀 netexprs")
+        _rust_announced = True
+
 # define asset path
 asset_path, filename = os.path.split(os.path.abspath(__file__))
 asset_path = asset_path + "/assets"
@@ -416,6 +424,9 @@ class GlobalMetabolicNetwork:
         self.idx_to_rid = None
         self.cid_to_idx = None
         self.idx_to_cid = None
+
+        global _rust_announced
+        _rust_announced = False
 
     def _x_to_compounds(self, x_arr):
         """Convert compound boolean array to list of compound IDs."""
@@ -873,7 +884,7 @@ class GlobalMetabolicNetwork:
             For 'trace': (compound_dict, reaction_dict) - dicts mapping ID to iteration
         """
         if _HAS_RUST and algorithm.lower() in ("naive", "trace"):
-            print("Using Rust backend")
+            _announce_rust()
             if algorithm.lower() == "trace":
                 return self._expand_trace_rust(seedSet, excluded_reactions)
             else:
@@ -990,7 +1001,7 @@ class GlobalMetabolicNetwork:
             (compounds, reactions) - lists of IDs remaining after contraction
         """
         if _HAS_RUST:
-            print("Using Rust backend")
+            _announce_rust()
             return self._contract_rust(reactionScope, compoundScope, extinctReactions)
         else:
             return self._contract_python(reactionScope, compoundScope, extinctReactions)
@@ -1057,7 +1068,7 @@ class GlobalMetabolicNetwork:
             For 'trace': (compoundScopes, reactionScopes) - lists of {ID: iteration} dicts
         """
         if _HAS_RUST and algorithm.lower() in ("naive", "trace"):
-            print("Using Rust backend")
+            _announce_rust()
             return self._run_expansions_rust(seedSets, algorithm)
         else:
             return self._run_expansions_python(seedSets, algorithm)
@@ -1144,7 +1155,7 @@ class GlobalMetabolicNetwork:
             (compoundScopes, reactionScopes) - lists of results for each extinction set
         """
         if _HAS_RUST:
-            print("Using Rust backend")
+            _announce_rust()
             return self._run_contractions_rust(
                 reactionScope, compoundScope, extinctReactionSets
             )
@@ -1238,7 +1249,7 @@ class GlobalMetabolicNetwork:
             (compoundScopes, reactionScopes) - lists of results for each mask
         """
         if _HAS_RUST:
-            print("Using Rust backend")
+            _announce_rust()
             return self._run_expansions_reactionMasks_rust(seedSet, maskedReactionSets)
         else:
             return self._run_expansions_reactionMasks_python(
