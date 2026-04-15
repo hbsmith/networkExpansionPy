@@ -990,6 +990,10 @@ class GlobalMetabolicNetwork:
         """
         Run expansion for multiple seed sets.
 
+        When Rust acceleration is available and algorithm is 'naive', all seed
+        sets are batched into a single Rust call that parallelizes across seeds
+        via Rayon.
+
         Args:
             seedSets: List of seed sets (each is a list of compound IDs)
             algorithm: 'naive' or 'trace'
@@ -997,20 +1001,52 @@ class GlobalMetabolicNetwork:
         Returns:
             (compoundScopes, reactionScopes) - lists of results for each seed set
         """
-        # For naive algorithm with Rust, we can use the optimized single expansion
-        # A future optimization could batch these in Rust
         if _HAS_RUST and algorithm.lower() == "naive":
             print("Using Rust backend")
-            self._ensure_rust_ready()
-            compoundScopes = []
-            reactionScopes = []
-            for seedSet in seedSets:
-                compounds, reactions = self._expand_rust(seedSet, excluded_reactions=None)
-                compoundScopes.append(compounds)
-                reactionScopes.append(reactions)
-            return compoundScopes, reactionScopes
+            return self._run_expansions_rust(seedSets)
         else:
             return self._run_expansions_python(seedSets, algorithm)
+
+    def _run_expansions_rust(self, seedSets):
+        """Rust-accelerated batch expansion over multiple seed sets.
+
+        Converts each seed set to a binary compound vector, stacks them into
+        an (n_seeds × n_compounds) matrix, and makes a single call to
+        ``netexprs.expand_batch`` which parallelizes across rows via Rayon.
+        """
+        self._ensure_rust_ready()
+        ra = self._rust_arrays
+
+        # Build seed matrix: each row is a binary compound vector
+        n_seeds = len(seedSets)
+        x_init_batch = np.zeros((n_seeds, ra["n_compounds"]), dtype=np.uint8)
+        for i, seedSet in enumerate(seedSets):
+            x_init_batch[i] = self.initialize_metabolite_vector(seedSet).astype(np.uint8)
+
+        # Single Rust call for all expansions
+        x_batch, y_batch = netexprs.expand_batch(
+            ra["rt_data"],
+            ra["rt_indices"],
+            ra["rt_indptr"],
+            ra["n_reactions"],
+            ra["p_data"],
+            ra["p_indices"],
+            ra["p_indptr"],
+            ra["n_compounds"],
+            x_init_batch,
+            ra["b"],
+        )
+
+        # Convert outputs
+        compoundScopes = []
+        reactionScopes = []
+        for i in range(n_seeds):
+            compounds = self._x_to_compounds(x_batch[i])
+            reactions = self._y_to_reactions(y_batch[i])
+            compoundScopes.append(compounds)
+            reactionScopes.append(reactions)
+
+        return compoundScopes, reactionScopes
 
     def _run_expansions_python(self, seedSets, algorithm="naive"):
         """Pure Python batch expansion."""
@@ -1315,8 +1351,8 @@ class GlobalMetabolicNetwork:
         Run expansion for multiple seed sets in parallel.
 
         Note: When Rust acceleration is available, this delegates to run_expansions()
-        which uses Rust's native parallelization (Rayon). The _parallel suffix is kept
-        for API compatibility.
+        which batches all seed sets into a single Rust call parallelized via Rayon.
+        The _parallel suffix is kept for API compatibility.
 
         Args:
             seedSets: List of seed sets (each is a list of compound IDs)
