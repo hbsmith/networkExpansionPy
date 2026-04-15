@@ -275,9 +275,9 @@ class GlobalMetabolicNetwork:
     **Rust acceleration**
 
     When ``netexprs`` is installed, compute-intensive methods automatically
-    dispatch to a Rust backend with Rayon-based parallelism. The ``trace``
-    algorithm always uses Python. Falls back to Python silently if
-    ``netexprs`` is unavailable.
+    dispatch to a Rust backend with Rayon-based parallelism. All algorithms
+    including ``trace`` use Rust when available. Falls back to Python
+    silently if ``netexprs`` is unavailable.
     """
     
 
@@ -434,6 +434,72 @@ class GlobalMetabolicNetwork:
             # Handle sparse matrix
             ridx = np.nonzero(y_arr.toarray().ravel())[0]
         return [self.idx_to_rid[i] for i in ridx]
+
+    def _iters_to_dict(self, iter_arr, idx_to_id):
+        """Convert a Rust iteration vector (int32) to {id: iteration} dict.
+
+        Entries with value -1 (never reached) are excluded.
+        """
+        return {
+            idx_to_id[int(i)]: int(iter_arr[i])
+            for i in range(len(iter_arr))
+            if iter_arr[i] >= 0
+        }
+
+    def _call_expand_batch(self, x_init_batch, masks=None):
+        """Call netexprs.expand_batch with cached CSR arrays.
+
+        Args:
+            x_init_batch: (N × n_compounds) uint8 array
+            masks: optional (N × n_reactions) uint8 array
+
+        Returns:
+            (x_batch, y_batch) — 2D numpy arrays
+        """
+        self._ensure_rust_ready()
+        ra = self._rust_arrays
+        return netexprs.expand_batch(
+            ra["rt_data"], ra["rt_indices"], ra["rt_indptr"], ra["n_reactions"],
+            ra["p_data"], ra["p_indices"], ra["p_indptr"], ra["n_compounds"],
+            x_init_batch, ra["b"], masks,
+        )
+
+    def _call_expand_trace_batch(self, x_init_batch, masks=None):
+        """Call netexprs.expand_trace_batch with cached CSR arrays.
+
+        Args:
+            x_init_batch: (N × n_compounds) uint8 array
+            masks: optional (N × n_reactions) uint8 array
+
+        Returns:
+            (c_iters_batch, r_iters_batch) — 2D int32 numpy arrays
+        """
+        self._ensure_rust_ready()
+        ra = self._rust_arrays
+        return netexprs.expand_trace_batch(
+            ra["rt_data"], ra["rt_indices"], ra["rt_indptr"], ra["n_reactions"],
+            ra["p_data"], ra["p_indices"], ra["p_indptr"], ra["n_compounds"],
+            x_init_batch, ra["b"], masks,
+        )
+
+    def _call_contract_batch(self, x_active_batch, y_active_batch, y_extinct_batch):
+        """Call netexprs.contract_batch with cached CSR arrays.
+
+        Args:
+            x_active_batch: (N × n_compounds) uint8 array
+            y_active_batch: (N × n_reactions) uint8 array
+            y_extinct_batch: (N × n_reactions) uint8 array
+
+        Returns:
+            (x_batch, y_batch) — 2D numpy arrays
+        """
+        self._ensure_rust_ready()
+        ra = self._rust_arrays
+        return netexprs.contract_batch(
+            ra["rt_data"], ra["rt_indices"], ra["rt_indptr"], ra["n_reactions"],
+            ra["p_data"], ra["p_indices"], ra["p_indptr"], ra["n_compounds"],
+            x_active_batch, y_active_batch, y_extinct_batch,
+        )
 
     def copy(self):
         return deepcopy(self)
@@ -793,7 +859,7 @@ class GlobalMetabolicNetwork:
     def expand(self, seedSet, algorithm="naive", excluded_reactions=None):
         """
         Run network expansion from a seed set of compounds.
- 
+
         Args:
             seedSet: List of compound IDs to start expansion from
             algorithm: 'naive', 'cr', 'trace', or 'step'
@@ -801,63 +867,65 @@ class GlobalMetabolicNetwork:
                 the network before expanding. Accepts either tuple
                 (rn_id, direction) or plain string rn_id (both directed
                 copies are excluded). See initialize_reaction_vector().
- 
+
         Returns:
             For 'naive', 'cr', 'step': (compounds, reactions) - lists of IDs in scope
             For 'trace': (compound_dict, reaction_dict) - dicts mapping ID to iteration
         """
-        if _HAS_RUST and algorithm.lower() == "naive":
+        if _HAS_RUST and algorithm.lower() in ("naive", "trace"):
             print("Using Rust backend")
-            return self._expand_rust(seedSet, excluded_reactions)
+            if algorithm.lower() == "trace":
+                return self._expand_trace_rust(seedSet, excluded_reactions)
+            else:
+                return self._expand_rust(seedSet, excluded_reactions)
         else:
             return self._expand_python(seedSet, algorithm, excluded_reactions)
 
     def _expand_rust(self, seedSet, excluded_reactions=None):
-        """Rust-accelerated network expansion (naive algorithm only).
- 
-        Internally uses a *keep* mask vector: 1 = reaction allowed, 0 = excluded.
-        ``excluded_reactions`` (IDs to remove) is inverted once via
-        ``initialize_reaction_vector()`` before being passed to Rust.
+        """Rust-accelerated network expansion (naive algorithm).
+
+        Wraps a single seed set into a 1-row batch call to expand_batch.
         """
         self._ensure_rust_ready()
         ra = self._rust_arrays
- 
+
         x0 = self.initialize_metabolite_vector(seedSet).astype(np.uint8)
- 
+        x_init_batch = x0.reshape(1, -1)
+
+        masks = None
         if excluded_reactions is not None and len(excluded_reactions) > 0:
             exclude_vec = self.initialize_reaction_vector(excluded_reactions).astype(np.uint8)
             mask = (1 - exclude_vec).astype(np.uint8)
- 
-            x_arr, y_arr = netexprs.expand_masked(
-                ra["rt_data"],
-                ra["rt_indices"],
-                ra["rt_indptr"],
-                ra["n_reactions"],
-                ra["p_data"],
-                ra["p_indices"],
-                ra["p_indptr"],
-                ra["n_compounds"],
-                x0,
-                ra["b"],
-                mask,
-            )
-        else:
-            x_arr, y_arr = netexprs.expand(
-                ra["rt_data"],
-                ra["rt_indices"],
-                ra["rt_indptr"],
-                ra["n_reactions"],
-                ra["p_data"],
-                ra["p_indices"],
-                ra["p_indptr"],
-                ra["n_compounds"],
-                x0,
-                ra["b"],
-            )
- 
-        compounds = self._x_to_compounds(x_arr)
-        reactions = self._y_to_reactions(y_arr)
+            masks = mask.reshape(1, -1)
+
+        x_batch, y_batch = self._call_expand_batch(x_init_batch, masks)
+
+        compounds = self._x_to_compounds(x_batch[0])
+        reactions = self._y_to_reactions(y_batch[0])
         return compounds, reactions
+
+    def _expand_trace_rust(self, seedSet, excluded_reactions=None):
+        """Rust-accelerated trace expansion.
+
+        Wraps a single seed set into a 1-row batch call to expand_trace_batch.
+        Returns (compound_dict, reaction_dict) mapping IDs to iteration numbers.
+        """
+        self._ensure_rust_ready()
+
+        x0 = self.initialize_metabolite_vector(seedSet).astype(np.uint8)
+        x_init_batch = x0.reshape(1, -1)
+
+        masks = None
+        if excluded_reactions is not None and len(excluded_reactions) > 0:
+            exclude_vec = self.initialize_reaction_vector(excluded_reactions).astype(np.uint8)
+            mask = (1 - exclude_vec).astype(np.uint8)
+            masks = mask.reshape(1, -1)
+
+        c_iters, r_iters = self._call_expand_trace_batch(x_init_batch, masks)
+
+        compound_dict = self._iters_to_dict(c_iters[0], self.idx_to_cid)
+        reaction_dict = self._iters_to_dict(r_iters[0], self.idx_to_rid)
+        return compound_dict, reaction_dict
 
     def _expand_python(self, seedSet, algorithm="naive", excluded_reactions=None):
         """Pure Python expansion (supports all algorithms).
@@ -928,31 +996,18 @@ class GlobalMetabolicNetwork:
             return self._contract_python(reactionScope, compoundScope, extinctReactions)
 
     def _contract_rust(self, reactionScope, compoundScope, extinctReactions):
-        """Rust-accelerated contraction."""
+        """Rust-accelerated contraction (single, via 1-row batch)."""
         self._ensure_rust_ready()
         ra = self._rust_arrays
 
-        # Convert ID lists to arrays
-        x_active = self.initialize_metabolite_vector(compoundScope).astype(np.uint8)
-        y_active = self.initialize_reaction_vector(reactionScope).astype(np.uint8)
-        y_extinct = self.initialize_reaction_vector(extinctReactions).astype(np.uint8)
+        x_active = self.initialize_metabolite_vector(compoundScope).astype(np.uint8).reshape(1, -1)
+        y_active = self.initialize_reaction_vector(reactionScope).astype(np.uint8).reshape(1, -1)
+        y_extinct = self.initialize_reaction_vector(extinctReactions).astype(np.uint8).reshape(1, -1)
 
-        x_arr, y_arr = netexprs.contract(
-            ra["rt_data"],
-            ra["rt_indices"],
-            ra["rt_indptr"],
-            ra["n_reactions"],
-            ra["p_data"],
-            ra["p_indices"],
-            ra["p_indptr"],
-            ra["n_compounds"],
-            x_active,
-            y_active,
-            y_extinct,
-        )
+        x_batch, y_batch = self._call_contract_batch(x_active, y_active, y_extinct)
 
-        compounds = self._x_to_compounds(x_arr)
-        reactions = self._y_to_reactions(y_arr)
+        compounds = self._x_to_compounds(x_batch[0])
+        reactions = self._y_to_reactions(y_batch[0])
         return compounds, reactions
 
     def _contract_python(self, reactionScope, compoundScope, extinctReactions):
@@ -990,61 +1045,51 @@ class GlobalMetabolicNetwork:
         """
         Run expansion for multiple seed sets.
 
-        When Rust acceleration is available and algorithm is 'naive', all seed
-        sets are batched into a single Rust call that parallelizes across seeds
-        via Rayon.
+        When Rust is available, all seed sets are batched into a single Rust
+        call parallelized via Rayon. Supports both 'naive' and 'trace'.
 
         Args:
             seedSets: List of seed sets (each is a list of compound IDs)
             algorithm: 'naive' or 'trace'
 
         Returns:
-            (compoundScopes, reactionScopes) - lists of results for each seed set
+            For 'naive': (compoundScopes, reactionScopes) - lists of ID lists
+            For 'trace': (compoundScopes, reactionScopes) - lists of {ID: iteration} dicts
         """
-        if _HAS_RUST and algorithm.lower() == "naive":
+        if _HAS_RUST and algorithm.lower() in ("naive", "trace"):
             print("Using Rust backend")
-            return self._run_expansions_rust(seedSets)
+            return self._run_expansions_rust(seedSets, algorithm)
         else:
             return self._run_expansions_python(seedSets, algorithm)
 
-    def _run_expansions_rust(self, seedSets):
+    def _run_expansions_rust(self, seedSets, algorithm="naive"):
         """Rust-accelerated batch expansion over multiple seed sets.
 
         Converts each seed set to a binary compound vector, stacks them into
-        an (n_seeds × n_compounds) matrix, and makes a single call to
-        ``netexprs.expand_batch`` which parallelizes across rows via Rayon.
+        an (N × n_compounds) matrix, and makes a single Rust call.
         """
         self._ensure_rust_ready()
         ra = self._rust_arrays
 
-        # Build seed matrix: each row is a binary compound vector
         n_seeds = len(seedSets)
         x_init_batch = np.zeros((n_seeds, ra["n_compounds"]), dtype=np.uint8)
         for i, seedSet in enumerate(seedSets):
             x_init_batch[i] = self.initialize_metabolite_vector(seedSet).astype(np.uint8)
 
-        # Single Rust call for all expansions
-        x_batch, y_batch = netexprs.expand_batch(
-            ra["rt_data"],
-            ra["rt_indices"],
-            ra["rt_indptr"],
-            ra["n_reactions"],
-            ra["p_data"],
-            ra["p_indices"],
-            ra["p_indptr"],
-            ra["n_compounds"],
-            x_init_batch,
-            ra["b"],
-        )
-
-        # Convert outputs
-        compoundScopes = []
-        reactionScopes = []
-        for i in range(n_seeds):
-            compounds = self._x_to_compounds(x_batch[i])
-            reactions = self._y_to_reactions(y_batch[i])
-            compoundScopes.append(compounds)
-            reactionScopes.append(reactions)
+        if algorithm.lower() == "trace":
+            c_iters, r_iters = self._call_expand_trace_batch(x_init_batch)
+            compoundScopes = []
+            reactionScopes = []
+            for i in range(n_seeds):
+                compoundScopes.append(self._iters_to_dict(c_iters[i], self.idx_to_cid))
+                reactionScopes.append(self._iters_to_dict(r_iters[i], self.idx_to_rid))
+        else:
+            x_batch, y_batch = self._call_expand_batch(x_init_batch)
+            compoundScopes = []
+            reactionScopes = []
+            for i in range(n_seeds):
+                compoundScopes.append(self._x_to_compounds(x_batch[i]))
+                reactionScopes.append(self._y_to_reactions(y_batch[i]))
 
         return compoundScopes, reactionScopes
 
@@ -1111,47 +1156,33 @@ class GlobalMetabolicNetwork:
     def _run_contractions_rust(self, reactionScope, compoundScope, extinctReactionSets):
         """Rust-accelerated batch contraction.
 
-        Builds a (n_batches × n_reactions) matrix of *extinct* vectors:
-        1 = reaction is extinct, 0 = active. Note the opposite sign convention
-        from expansion mask vectors — no inversion is applied here.
-        ``initialize_reaction_vector()`` is used directly.
+        x_active and y_active are the same for every batch row (shared scope),
+        so we tile them. y_extinct varies per row.
         """
         self._ensure_rust_ready()
         ra = self._rust_arrays
 
-        # Convert scope to arrays (shared across all contractions)
         x_active = self.initialize_metabolite_vector(compoundScope).astype(np.uint8)
         y_active = self.initialize_reaction_vector(reactionScope).astype(np.uint8)
 
-        # Build batch extinction matrix
         n_batches = len(extinctReactionSets)
+
+        # Tile shared scope vectors
+        x_active_batch = np.tile(x_active, (n_batches, 1))
+        y_active_batch = np.tile(y_active, (n_batches, 1))
+
+        # Build extinction matrix
         y_extinct_batch = np.zeros((n_batches, ra["n_reactions"]), dtype=np.uint8)
         for i, extinctReactions in enumerate(extinctReactionSets):
             y_extinct_batch[i] = self.initialize_reaction_vector(extinctReactions).astype(np.uint8)
 
-        # Single Rust call for all contractions
-        x_batch, y_batch = netexprs.contract_batch(
-            ra["rt_data"],
-            ra["rt_indices"],
-            ra["rt_indptr"],
-            ra["n_reactions"],
-            ra["p_data"],
-            ra["p_indices"],
-            ra["p_indptr"],
-            ra["n_compounds"],
-            x_active,
-            y_active,
-            y_extinct_batch,
-        )
+        x_batch, y_batch = self._call_contract_batch(x_active_batch, y_active_batch, y_extinct_batch)
 
-        # Convert outputs
         compoundScopes = []
         reactionScopes = []
         for i in range(n_batches):
-            compounds = self._x_to_compounds(x_batch[i])
-            reactions = self._y_to_reactions(y_batch[i])
-            compoundScopes.append(compounds)
-            reactionScopes.append(reactions)
+            compoundScopes.append(self._x_to_compounds(x_batch[i]))
+            reactionScopes.append(self._y_to_reactions(y_batch[i]))
 
         return compoundScopes, reactionScopes
 
@@ -1217,48 +1248,32 @@ class GlobalMetabolicNetwork:
     def _run_expansions_reactionMasks_rust(self, seedSet, maskedReactionSets):
         """Rust-accelerated batch masked expansion.
 
-        Builds a (n_masks × n_reactions) matrix of *keep* mask vectors:
-        1 = reaction allowed, 0 = excluded. Each row corresponds to one entry in
-        ``maskedReactionSets`` (IDs to remove), inverted via
-        ``initialize_reaction_vector()``.
+        Builds a (N × n_reactions) mask matrix (1=allowed, 0=excluded) and
+        tiles the seed vector into an (N × n_compounds) matrix, then makes
+        a single call to expand_batch.
         """
         self._ensure_rust_ready()
         ra = self._rust_arrays
 
-        # Convert seedSet to x0 array (shared across all expansions)
         x0 = self.initialize_metabolite_vector(seedSet).astype(np.uint8)
-
-        # Build batch mask matrix
-        # maskedReactionSets contains reactions to REMOVE, so mask = 1 - removed
         n_masks = len(maskedReactionSets)
+
+        # Tile seed vector: same seeds for every mask
+        x_init_batch = np.tile(x0, (n_masks, 1))
+
+        # Build mask matrix
         masks = np.ones((n_masks, ra["n_reactions"]), dtype=np.uint8)
         for i, rxns_removed in enumerate(maskedReactionSets):
             exclude_vec = self.initialize_reaction_vector(rxns_removed).astype(np.uint8)
             masks[i] = 1 - exclude_vec
 
-        # Single Rust call for all expansions
-        x_batch, y_batch = netexprs.expand_masked_batch(
-            ra["rt_data"],
-            ra["rt_indices"],
-            ra["rt_indptr"],
-            ra["n_reactions"],
-            ra["p_data"],
-            ra["p_indices"],
-            ra["p_indptr"],
-            ra["n_compounds"],
-            x0,
-            ra["b"],
-            masks,
-        )
+        x_batch, y_batch = self._call_expand_batch(x_init_batch, masks)
 
-        # Convert outputs
         compoundScopes = []
         reactionScopes = []
         for i in range(n_masks):
-            compounds = self._x_to_compounds(x_batch[i])
-            reactions = self._y_to_reactions(y_batch[i])
-            compoundScopes.append(compounds)
-            reactionScopes.append(reactions)
+            compoundScopes.append(self._x_to_compounds(x_batch[i]))
+            reactionScopes.append(self._y_to_reactions(y_batch[i]))
 
         return compoundScopes, reactionScopes
 

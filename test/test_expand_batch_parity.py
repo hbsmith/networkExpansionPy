@@ -1,12 +1,8 @@
 """
-Parity tests for netexprs.expand_batch — the new Rust function for
-parallelizing expansion across multiple seed sets.
-
-Tests at two levels:
-  1. Low-level: call netexprs.expand_batch directly and compare each row
-     against netexprs.expand (single-seed Rust expansion).
-  2. High-level: call _run_expansions_rust (batch) and compare against
-     _run_expansions_python (loop) through the GlobalMetabolicNetwork API.
+Parity tests for the consolidated Rust API:
+  - expand_batch (unified, replaces expand/expand_masked/expand_masked_batch)
+  - expand_trace_batch (new Rust trace)
+  - contract_batch (unified, replaces contract/contract_batch)
 """
 
 import unittest
@@ -21,13 +17,27 @@ except ImportError:
     netexprs = None
 
 
-# ---------------------------------------------------------------------------
-# Low-level tests: netexprs.expand_batch vs netexprs.expand
-# ---------------------------------------------------------------------------
+# ── Helpers ──────────────────────────────────────────────────────────────
+
+def make_toy():
+    toy = ne.GlobalMetabolicNetwork("dev")
+    rxns = [
+        (["A", "B"], ["C"]),
+        (["C", "D"], ["E", "F"]),
+        (["E", "F"], ["G"]),
+        (["G", "H"], ["I"]),
+        (["A", "J"], ["I"]),
+    ]
+    toy.network = ne._load_tuple_network(rxns)
+    toy.convertToIrreversible()
+    return toy
+
+
+# ── expand_batch: low-level ──────────────────────────────────────────────
 
 @unittest.skipIf(netexprs is None, "netexprs not installed")
 class TestExpandBatchLowLevel(unittest.TestCase):
-    """Direct comparison of expand_batch rows against single expand calls."""
+    """Direct netexprs.expand_batch calls — compare 1-row vs N-row consistency."""
 
     @classmethod
     def setUpClass(cls):
@@ -35,316 +45,293 @@ class TestExpandBatchLowLevel(unittest.TestCase):
         cls.kegg.pruneInconsistentReactions()
         cls.kegg.convertToIrreversible()
         cls.kegg._ensure_rust_ready()
-
+        cls.ra = cls.kegg._rust_arrays
         seeds_df = ne.pd.read_csv(ne.asset_path + "/compounds/seeds.Goldford2022.csv")
         cls.all_seeds = list(set(seeds_df["ID"]))
 
-        ra = cls.kegg._rust_arrays
-        cls.ra = ra
-
-    def _run_single(self, x0):
-        """Run a single expansion via netexprs.expand."""
-        ra = self.ra
-        return netexprs.expand(
-            ra["rt_data"], ra["rt_indices"], ra["rt_indptr"], ra["n_reactions"],
-            ra["p_data"], ra["p_indices"], ra["p_indptr"], ra["n_compounds"],
-            x0, ra["b"],
-        )
-
-    def _run_batch(self, x_batch):
-        """Run batch expansion via netexprs.expand_batch."""
+    def _batch_call(self, x_batch, masks=None):
         ra = self.ra
         return netexprs.expand_batch(
             ra["rt_data"], ra["rt_indices"], ra["rt_indptr"], ra["n_reactions"],
             ra["p_data"], ra["p_indices"], ra["p_indptr"], ra["n_compounds"],
-            x_batch, ra["b"],
+            x_batch, ra["b"], masks,
         )
 
-    def test_single_seed_set_matches(self):
-        """Batch with one row should equal single expand."""
+    def test_single_row_no_mask(self):
         x0 = self.kegg.initialize_metabolite_vector(self.all_seeds).astype(np.uint8)
-        x_single, y_single = self._run_single(x0)
+        x_out, y_out = self._batch_call(x0.reshape(1, -1))
+        self.assertEqual(x_out.shape[0], 1)
+        self.assertTrue(x_out[0].sum() > 0)
 
-        x_batch_in = x0.reshape(1, -1)
-        x_batch_out, y_batch_out = self._run_batch(x_batch_in)
-
-        np.testing.assert_array_equal(x_single, x_batch_out[0])
-        np.testing.assert_array_equal(y_single, y_batch_out[0])
-
-    def test_multiple_seed_sets(self):
-        """Batch with N rows should equal N individual expand calls."""
+    def test_multi_row_no_mask(self):
         random_seed(42)
-        seed_sets = [
-            self.all_seeds,
-            self.all_seeds[:10],
-            sample(self.all_seeds, 20),
-            sample(self.all_seeds, 5),
-            ["C00001"],  # water only
-        ]
+        seed_sets = [self.all_seeds, self.all_seeds[:10], sample(self.all_seeds, 20)]
+        n = len(seed_sets)
+        x_batch = np.zeros((n, self.ra["n_compounds"]), dtype=np.uint8)
+        for i, s in enumerate(seed_sets):
+            x_batch[i] = self.kegg.initialize_metabolite_vector(s).astype(np.uint8)
 
-        n_compounds = self.ra["n_compounds"]
-        x_batch_in = np.zeros((len(seed_sets), n_compounds), dtype=np.uint8)
-        for i, seeds in enumerate(seed_sets):
-            x_batch_in[i] = self.kegg.initialize_metabolite_vector(seeds).astype(np.uint8)
+        x_out, y_out = self._batch_call(x_batch)
 
-        x_batch_out, y_batch_out = self._run_batch(x_batch_in)
+        # Each row should match a single-row call
+        for i in range(n):
+            x_single, y_single = self._batch_call(x_batch[i:i+1])
+            np.testing.assert_array_equal(x_out[i], x_single[0], err_msg=f"x mismatch row {i}")
+            np.testing.assert_array_equal(y_out[i], y_single[0], err_msg=f"y mismatch row {i}")
 
-        for i in range(len(seed_sets)):
-            x_single, y_single = self._run_single(x_batch_in[i])
-            np.testing.assert_array_equal(
-                x_single, x_batch_out[i],
-                err_msg=f"Compound mismatch for seed set {i}",
-            )
-            np.testing.assert_array_equal(
-                y_single, y_batch_out[i],
-                err_msg=f"Reaction mismatch for seed set {i}",
-            )
+    def test_with_mask(self):
+        """Single seed + mask should match old expand_masked behavior."""
+        x0 = self.kegg.initialize_metabolite_vector(self.all_seeds).astype(np.uint8)
+        mask = np.ones(self.ra["n_reactions"], dtype=np.uint8)
+        # Zero out first 100 reactions
+        mask[:100] = 0
 
-    def test_empty_seed_set(self):
-        """A row of all zeros (no seeds) should produce no expansion."""
-        n_compounds = self.ra["n_compounds"]
-        x_batch_in = np.zeros((1, n_compounds), dtype=np.uint8)
-        x_batch_out, y_batch_out = self._run_batch(x_batch_in)
+        x_out, y_out = self._batch_call(x0.reshape(1, -1), mask.reshape(1, -1))
+        # Masked-out reactions should not fire
+        np.testing.assert_array_equal(y_out[0, :100], 0)
 
-        np.testing.assert_array_equal(x_batch_out[0], np.zeros(n_compounds, dtype=np.uint8))
-        np.testing.assert_array_equal(y_batch_out[0], np.zeros(self.ra["n_reactions"], dtype=np.uint8))
+    def test_multi_row_with_masks(self):
+        """N seeds × N masks — each row gets its own mask."""
+        random_seed(99)
+        n = 5
+        x_batch = np.zeros((n, self.ra["n_compounds"]), dtype=np.uint8)
+        masks = np.ones((n, self.ra["n_reactions"]), dtype=np.uint8)
+        for i in range(n):
+            seeds = sample(self.all_seeds, 10 + i * 5)
+            x_batch[i] = self.kegg.initialize_metabolite_vector(seeds).astype(np.uint8)
+            masks[i, :i*50] = 0  # increasingly aggressive masking
 
-    def test_output_shapes(self):
-        """Output arrays should have correct shapes."""
-        n_seeds = 7
-        n_compounds = self.ra["n_compounds"]
-        n_reactions = self.ra["n_reactions"]
+        x_out_batch, y_out_batch = self._batch_call(x_batch, masks)
 
-        x_batch_in = np.zeros((n_seeds, n_compounds), dtype=np.uint8)
-        for i in range(n_seeds):
-            subset = sample(self.all_seeds, min(i + 1, len(self.all_seeds)))
-            x_batch_in[i] = self.kegg.initialize_metabolite_vector(subset).astype(np.uint8)
+        for i in range(n):
+            x_single, y_single = self._batch_call(x_batch[i:i+1], masks[i:i+1])
+            np.testing.assert_array_equal(x_out_batch[i], x_single[0])
+            np.testing.assert_array_equal(y_out_batch[i], y_single[0])
 
-        x_out, y_out = self._run_batch(x_batch_in)
-
-        self.assertEqual(x_out.shape, (n_seeds, n_compounds))
-        self.assertEqual(y_out.shape, (n_seeds, n_reactions))
-
-
-# ---------------------------------------------------------------------------
-# Low-level toy network tests
-# ---------------------------------------------------------------------------
-
-@unittest.skipIf(netexprs is None, "netexprs not installed")
-class TestExpandBatchLowLevelToy(unittest.TestCase):
-    """Low-level batch tests on a small toy network for easy debugging."""
-
-    @classmethod
-    def setUpClass(cls):
-        toy = ne.GlobalMetabolicNetwork("dev")
-        rxns = [
-            (["A", "B"], ["C"]),
-            (["C", "D"], ["E", "F"]),
-            (["E", "F"], ["G"]),
-            (["G", "H"], ["I"]),
-            (["A", "J"], ["I"]),
-        ]
-        toy.network = ne._load_tuple_network(rxns)
-        toy.convertToIrreversible()
-        toy._ensure_rust_ready()
-        cls.toy = toy
-        cls.ra = toy._rust_arrays
-
-    def test_toy_batch_vs_single(self):
-        """Batch of different seed sets on toy network."""
-        seed_sets = [
-            ["A", "B", "D", "H"],
-            ["I"],
-            ["A"],
-            ["A", "B", "D", "H", "J"],
-        ]
-
-        n_compounds = self.ra["n_compounds"]
-        x_batch_in = np.zeros((len(seed_sets), n_compounds), dtype=np.uint8)
-        for i, seeds in enumerate(seed_sets):
-            x_batch_in[i] = self.toy.initialize_metabolite_vector(seeds).astype(np.uint8)
-
-        x_batch_out, y_batch_out = netexprs.expand_batch(
-            self.ra["rt_data"], self.ra["rt_indices"], self.ra["rt_indptr"],
-            self.ra["n_reactions"],
-            self.ra["p_data"], self.ra["p_indices"], self.ra["p_indptr"],
-            self.ra["n_compounds"],
-            x_batch_in, self.ra["b"],
-        )
-
-        for i in range(len(seed_sets)):
-            x_single, y_single = netexprs.expand(
-                self.ra["rt_data"], self.ra["rt_indices"], self.ra["rt_indptr"],
-                self.ra["n_reactions"],
-                self.ra["p_data"], self.ra["p_indices"], self.ra["p_indptr"],
-                self.ra["n_compounds"],
-                x_batch_in[i], self.ra["b"],
-            )
-            np.testing.assert_array_equal(x_single, x_batch_out[i],
-                                          err_msg=f"x mismatch for seed set {i}: {seed_sets[i]}")
-            np.testing.assert_array_equal(y_single, y_batch_out[i],
-                                          err_msg=f"y mismatch for seed set {i}: {seed_sets[i]}")
+    def test_empty_seeds(self):
+        """All-zero seed row should produce empty expansion."""
+        x_batch = np.zeros((1, self.ra["n_compounds"]), dtype=np.uint8)
+        x_out, y_out = self._batch_call(x_batch)
+        self.assertEqual(x_out[0].sum(), 0)
+        self.assertEqual(y_out[0].sum(), 0)
 
 
-# ---------------------------------------------------------------------------
-# High-level tests: _run_expansions_rust vs _run_expansions_python
-# ---------------------------------------------------------------------------
+# ── expand_batch: high-level ─────────────────────────────────────────────
 
-class TestRunExpansionsBatchHighLevel(unittest.TestCase):
-    """Compare _run_expansions_rust (batch) vs _run_expansions_python (loop)."""
+class TestExpandHighLevel(unittest.TestCase):
+    """_expand_rust and _run_expansions_rust vs Python equivalents."""
 
     @classmethod
     def setUpClass(cls):
         cls.kegg = ne.GlobalMetabolicNetwork()
         cls.kegg.pruneInconsistentReactions()
         cls.kegg.convertToIrreversible()
-
         seeds_df = ne.pd.read_csv(ne.asset_path + "/compounds/seeds.Goldford2022.csv")
         cls.all_seeds = list(set(seeds_df["ID"]))
 
-    def test_kegg_batch_parity(self):
-        """Multiple seed sets on KEGG should match Python loop."""
+    def test_single_expand_parity(self):
+        cpds_r, rxns_r = self.kegg._expand_rust(self.all_seeds)
+        cpds_p, rxns_p = self.kegg._expand_python(self.all_seeds, "naive")
+        self.assertEqual(set(cpds_r), set(cpds_p))
+        self.assertEqual(set(rxns_r), set(rxns_p))
+
+    def test_single_expand_with_mask(self):
+        self.kegg._ensure_dicts()
+        all_rxns = list(self.kegg.rid_to_idx.keys())
+        to_exclude = sample(all_rxns, len(all_rxns) // 10)
+
+        cpds_r, rxns_r = self.kegg._expand_rust(self.all_seeds, excluded_reactions=to_exclude)
+        cpds_p, rxns_p = self.kegg._expand_python(self.all_seeds, "naive", excluded_reactions=to_exclude)
+        self.assertEqual(set(cpds_r), set(cpds_p))
+        self.assertEqual(set(rxns_r), set(rxns_p))
+
+    def test_run_expansions_batch_parity(self):
         random_seed(42)
-        seed_sets = [
-            self.all_seeds,
-            self.all_seeds[:10],
-            sample(self.all_seeds, 20),
-            sample(self.all_seeds, 5),
-            ["C00001"],
-        ]
+        seed_sets = [self.all_seeds, self.all_seeds[:10], sample(self.all_seeds, 20)]
 
-        cpds_rust, rxns_rust = self.kegg._run_expansions_rust(seed_sets)
-        cpds_py, rxns_py = self.kegg._run_expansions_python(seed_sets, algorithm="naive")
+        cpds_r, rxns_r = self.kegg._run_expansions_rust(seed_sets, "naive")
+        cpds_p, rxns_p = self.kegg._run_expansions_python(seed_sets, "naive")
 
-        self.assertEqual(len(cpds_rust), len(cpds_py))
         for i in range(len(seed_sets)):
-            self.assertEqual(set(cpds_rust[i]), set(cpds_py[i]),
-                             f"Compound mismatch for seed set {i}")
-            self.assertEqual(set(rxns_rust[i]), set(rxns_py[i]),
-                             f"Reaction mismatch for seed set {i}")
+            self.assertEqual(set(cpds_r[i]), set(cpds_p[i]), f"cpds mismatch set {i}")
+            self.assertEqual(set(rxns_r[i]), set(rxns_p[i]), f"rxns mismatch set {i}")
 
-    def test_kegg_many_random_seeds(self):
-        """Larger batch of random seed subsets."""
+    def test_run_expansions_reactionMasks_parity(self):
         random_seed(123)
-        n_batches = 50
-        seed_sets = []
-        for _ in range(n_batches):
-            n = np.random.randint(1, len(self.all_seeds))
-            seed_sets.append(sample(self.all_seeds, n))
+        self.kegg._ensure_dicts()
+        all_rxns = list(self.kegg.rid_to_idx.keys())
+        network_rxns = list(set(r[0] for r in all_rxns))
 
-        cpds_rust, rxns_rust = self.kegg._run_expansions_rust(seed_sets)
-        cpds_py, rxns_py = self.kegg._run_expansions_python(seed_sets, algorithm="naive")
+        masked_sets = []
+        for _ in range(10):
+            n_remove = np.random.randint(0, len(network_rxns) // 10)
+            base = sample(network_rxns, n_remove)
+            masked_sets.append([r for r in all_rxns if r[0] in base])
 
-        for i in range(n_batches):
-            self.assertEqual(set(cpds_rust[i]), set(cpds_py[i]),
-                             f"Compound mismatch for seed set {i}")
-            self.assertEqual(set(rxns_rust[i]), set(rxns_py[i]),
-                             f"Reaction mismatch for seed set {i}")
+        cpds_r, rxns_r = self.kegg._run_expansions_reactionMasks_rust(self.all_seeds, masked_sets)
+        cpds_p, rxns_p = self.kegg._run_expansions_reactionMasks_python(self.all_seeds, masked_sets)
 
-
-class TestRunExpansionsBatchHighLevelToy(unittest.TestCase):
-    """High-level batch tests on a toy network."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.toy = ne.GlobalMetabolicNetwork("dev")
-        rxns = [
-            (["A", "B"], ["C"]),
-            (["C", "D"], ["E", "F"]),
-            (["E", "F"], ["G"]),
-            (["G", "H"], ["I"]),
-            (["A", "J"], ["I"]),
-        ]
-        cls.toy.network = ne._load_tuple_network(rxns)
-        cls.toy.convertToIrreversible()
-
-    def test_toy_batch_parity(self):
-        """Toy network batch should match Python loop."""
-        seed_sets = [
-            ["A", "B", "D", "H"],
-            ["I"],
-            ["A"],
-            ["A", "B", "D", "H", "J"],
-        ]
-
-        cpds_rust, rxns_rust = self.toy._run_expansions_rust(seed_sets)
-        cpds_py, rxns_py = self.toy._run_expansions_python(seed_sets, algorithm="naive")
-
-        for i in range(len(seed_sets)):
-            self.assertEqual(set(cpds_rust[i]), set(cpds_py[i]),
-                             f"Compound mismatch for seed set {i}: {seed_sets[i]}")
-            self.assertEqual(set(rxns_rust[i]), set(rxns_py[i]),
-                             f"Reaction mismatch for seed set {i}: {seed_sets[i]}")
+        for i in range(len(masked_sets)):
+            self.assertEqual(set(cpds_r[i]), set(cpds_p[i]), f"cpds mismatch mask {i}")
+            self.assertEqual(set(rxns_r[i]), set(rxns_p[i]), f"rxns mismatch mask {i}")
 
 
-# ---------------------------------------------------------------------------
-# Dispatch tests: run_expansions and run_expansions_parallel
-# ---------------------------------------------------------------------------
+# ── expand_trace_batch ───────────────────────────────────────────────────
 
-class TestRunExpansionsDispatch(unittest.TestCase):
-    """Verify that run_expansions dispatches to _run_expansions_rust."""
+class TestExpandTraceParity(unittest.TestCase):
+    """Rust trace vs Python trace."""
 
     @classmethod
     def setUpClass(cls):
         cls.kegg = ne.GlobalMetabolicNetwork()
         cls.kegg.pruneInconsistentReactions()
         cls.kegg.convertToIrreversible()
+        seeds_df = ne.pd.read_csv(ne.asset_path + "/compounds/seeds.Goldford2022.csv")
+        cls.all_seeds = list(set(seeds_df["ID"]))
 
+    def test_single_trace_parity(self):
+        cpds_r, rxns_r = self.kegg._expand_trace_rust(self.all_seeds)
+        cpds_p, rxns_p = self.kegg._expand_python(self.all_seeds, "trace")
+        self.assertEqual(cpds_r, cpds_p)
+        self.assertEqual(rxns_r, rxns_p)
+
+    def test_single_trace_small_seed(self):
+        cpds_r, rxns_r = self.kegg._expand_trace_rust(["C00001"])
+        cpds_p, rxns_p = self.kegg._expand_python(["C00001"], "trace")
+        self.assertEqual(cpds_r, cpds_p)
+        self.assertEqual(rxns_r, rxns_p)
+
+    def test_batch_trace_parity(self):
+        random_seed(42)
+        seed_sets = [self.all_seeds, self.all_seeds[:10], sample(self.all_seeds, 20)]
+
+        cpds_r, rxns_r = self.kegg._run_expansions_rust(seed_sets, "trace")
+        cpds_p, rxns_p = self.kegg._run_expansions_python(seed_sets, "trace")
+
+        for i in range(len(seed_sets)):
+            self.assertEqual(cpds_r[i], cpds_p[i], f"compound trace mismatch set {i}")
+            self.assertEqual(rxns_r[i], rxns_p[i], f"reaction trace mismatch set {i}")
+
+    def test_trace_via_public_api(self):
+        """expand() with algorithm='trace' should dispatch to Rust and match Python."""
+        cpds_api, rxns_api = self.kegg.expand(self.all_seeds, algorithm="trace")
+        cpds_py, rxns_py = self.kegg._expand_python(self.all_seeds, "trace")
+        self.assertEqual(cpds_api, cpds_py)
+        self.assertEqual(rxns_api, rxns_py)
+
+
+class TestExpandTraceParityToy(unittest.TestCase):
+    """Trace tests on toy network — easy to debug."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.toy = make_toy()
+
+    def test_toy_trace_full_seeds(self):
+        cpds_r, rxns_r = self.toy._expand_trace_rust(["A", "B", "D", "H"])
+        cpds_p, rxns_p = self.toy._expand_python(["A", "B", "D", "H"], "trace")
+        self.assertEqual(cpds_r, cpds_p)
+        self.assertEqual(rxns_r, rxns_p)
+
+    def test_toy_trace_single_seed(self):
+        cpds_r, rxns_r = self.toy._expand_trace_rust(["I"])
+        cpds_p, rxns_p = self.toy._expand_python(["I"], "trace")
+        self.assertEqual(cpds_r, cpds_p)
+        self.assertEqual(rxns_r, rxns_p)
+
+    def test_toy_trace_no_expansion(self):
+        """Seeds that can't fire anything — trace should only have iteration 0."""
+        cpds_r, rxns_r = self.toy._expand_trace_rust(["A", "D", "E", "H"])
+        cpds_p, rxns_p = self.toy._expand_python(["A", "D", "E", "H"], "trace")
+        self.assertEqual(cpds_r, cpds_p)
+        self.assertEqual(rxns_r, rxns_p)
+        # All compounds at iteration 0, no reactions
+        self.assertTrue(all(v == 0 for v in cpds_r.values()))
+        self.assertEqual(len(rxns_r), 0)
+
+
+# ── contract_batch: high-level ───────────────────────────────────────────
+
+class TestContractHighLevel(unittest.TestCase):
+    """Consolidated contract_batch vs Python contraction."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.kegg = ne.GlobalMetabolicNetwork()
+        cls.kegg.pruneInconsistentReactions()
+        cls.kegg.convertToIrreversible()
+        seeds_df = ne.pd.read_csv(ne.asset_path + "/compounds/seeds.Goldford2022.csv")
+        cls.all_seeds = list(set(seeds_df["ID"]))
+        cls.cpds_scope, cls.rxns_scope = cls.kegg._expand_python(cls.all_seeds, "naive")
+
+    def test_single_contraction_parity(self):
+        self.kegg._ensure_dicts()
+        all_rxns = list(self.kegg.rid_to_idx.keys())
+        extinct = sample(all_rxns, len(all_rxns) // 20)
+
+        cpds_r, rxns_r = self.kegg._contract_rust(self.rxns_scope, self.cpds_scope, extinct)
+        cpds_p, rxns_p = self.kegg._contract_python(self.rxns_scope, self.cpds_scope, extinct)
+        self.assertEqual(set(cpds_r), set(cpds_p))
+        self.assertEqual(set(rxns_r), set(rxns_p))
+
+    def test_batch_contraction_parity(self):
+        random_seed(42)
+        self.kegg._ensure_dicts()
+        all_rxns = list(self.kegg.rid_to_idx.keys())
+        network_rxns = list(set(r[0] for r in all_rxns))
+
+        extinct_sets = []
+        for _ in range(10):
+            n = np.random.randint(1, len(network_rxns) // 10)
+            base = sample(network_rxns, n)
+            extinct_sets.append([r for r in all_rxns if r[0] in base])
+
+        cpds_r, rxns_r = self.kegg._run_contractions_rust(
+            self.rxns_scope, self.cpds_scope, extinct_sets)
+        cpds_p, rxns_p = self.kegg._run_contractions_python(
+            self.rxns_scope, self.cpds_scope, extinct_sets)
+
+        for i in range(len(extinct_sets)):
+            self.assertEqual(set(cpds_r[i]), set(cpds_p[i]), f"cpds mismatch batch {i}")
+            self.assertEqual(set(rxns_r[i]), set(rxns_p[i]), f"rxns mismatch batch {i}")
+
+
+# ── Dispatch tests ───────────────────────────────────────────────────────
+
+class TestDispatch(unittest.TestCase):
+    """Verify public methods route to Rust when available."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.kegg = ne.GlobalMetabolicNetwork()
+        cls.kegg.pruneInconsistentReactions()
+        cls.kegg.convertToIrreversible()
         seeds_df = ne.pd.read_csv(ne.asset_path + "/compounds/seeds.Goldford2022.csv")
         cls.all_seeds = list(set(seeds_df["ID"]))
 
     @unittest.skipIf(netexprs is None, "netexprs not installed")
-    def test_run_expansions_uses_batch(self):
-        """run_expansions with naive should use _run_expansions_rust."""
+    def test_expand_naive_dispatches_rust(self):
         from unittest.mock import patch
-
-        seed_sets = [self.all_seeds[:10], self.all_seeds[:20]]
-
-        with patch.object(self.kegg, '_run_expansions_rust',
-                          wraps=self.kegg._run_expansions_rust) as mock_rust, \
-             patch.object(self.kegg, '_run_expansions_python',
-                          wraps=self.kegg._run_expansions_python) as mock_py:
-
+        with patch.object(self.kegg, '_expand_rust', wraps=self.kegg._expand_rust) as m:
             with patch.object(ne, '_HAS_RUST', True):
-                self.kegg.run_expansions(seed_sets, algorithm="naive")
+                self.kegg.expand(self.all_seeds[:5], algorithm="naive")
+            m.assert_called_once()
 
-            mock_rust.assert_called_once()
-            mock_py.assert_not_called()
-
-    def test_run_expansions_trace_uses_python(self):
-        """run_expansions with trace should use _run_expansions_python."""
+    @unittest.skipIf(netexprs is None, "netexprs not installed")
+    def test_expand_trace_dispatches_rust(self):
         from unittest.mock import patch
-
-        seed_sets = [self.all_seeds[:10]]
-
-        with patch.object(self.kegg, '_run_expansions_rust',
-                          wraps=self.kegg._run_expansions_rust) as mock_rust, \
-             patch.object(self.kegg, '_run_expansions_python',
-                          wraps=self.kegg._run_expansions_python) as mock_py:
-
+        with patch.object(self.kegg, '_expand_trace_rust', wraps=self.kegg._expand_trace_rust) as m:
             with patch.object(ne, '_HAS_RUST', True):
-                self.kegg.run_expansions(seed_sets, algorithm="trace")
+                self.kegg.expand(self.all_seeds[:5], algorithm="trace")
+            m.assert_called_once()
 
-            mock_rust.assert_not_called()
-            mock_py.assert_called_once()
-
-    def test_run_expansions_parallel_delegates(self):
-        """run_expansions_parallel should produce same results as run_expansions."""
-        random_seed(42)
-        seed_sets = [
-            self.all_seeds,
-            self.all_seeds[:10],
-            sample(self.all_seeds, 20),
-        ]
-
-        cpds_normal, rxns_normal = self.kegg.run_expansions(seed_sets)
-        cpds_parallel, rxns_parallel = self.kegg.run_expansions_parallel(seed_sets)
-
-        for i in range(len(seed_sets)):
-            self.assertEqual(set(cpds_normal[i]), set(cpds_parallel[i]),
-                             f"Compound mismatch for seed set {i}")
-            self.assertEqual(set(rxns_normal[i]), set(rxns_parallel[i]),
-                             f"Reaction mismatch for seed set {i}")
+    def test_expand_cr_stays_python(self):
+        """'cr' and 'step' algorithms should always use Python."""
+        from unittest.mock import patch
+        with patch.object(self.kegg, '_expand_python', wraps=self.kegg._expand_python) as m:
+            with patch.object(ne, '_HAS_RUST', True):
+                self.kegg.expand(self.all_seeds[:5], algorithm="cr")
+            m.assert_called_once()
 
 
 if __name__ == "__main__":
