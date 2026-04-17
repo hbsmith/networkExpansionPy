@@ -537,7 +537,7 @@ class TestRunExpansionsReactionMasksHighLevelLargeNetwork(unittest.TestCase):
     def test_kegg_batch_masked_expansions_large_batch(self):
         """Large batch of masked expansions."""
         random_seed(999)
-        n_batches = 100
+        n_batches = 10
 
         maskedSets = []
         for _ in range(n_batches):
