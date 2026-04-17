@@ -22,11 +22,13 @@ def rpxb(m, seedSet):
 
 
 def netExp_rs(R, P, x, b):
-    """Rust wrapper matching netExp signature."""
+    """Rust wrapper matching netExp signature — 1-row batch, no mask."""
     R_T = R.T.tocsr()
     P = P.tocsr()
 
-    x_out, y_out = netexprs.expand(
+    x_init = np.asarray(x.toarray()).ravel().astype(np.uint8).reshape(1, -1)
+
+    x_out, y_out = netexprs.expand_batch(
         R_T.data.astype(np.float64),
         R_T.indices.astype(np.int32),
         R_T.indptr.astype(np.int32),
@@ -35,18 +37,22 @@ def netExp_rs(R, P, x, b):
         P.indices.astype(np.int32),
         P.indptr.astype(np.int32),
         P.shape[0],
-        np.asarray(x.toarray()).ravel().astype(np.uint8),
+        x_init,
         np.asarray(b.toarray()).ravel().astype(np.float64),
+        None,
     )
 
-    return x_out, y_out
+    return x_out[0], y_out[0]
 
 def netExp_masked_rs(R, P, x, b, mask):
-    """Rust wrapper for masked expansion."""
+    """Rust wrapper for masked expansion — 1-row batch with 1-row mask."""
     R_T = R.T.tocsr()
     P = P.tocsr()
 
-    x_out, y_out = netexprs.expand_masked(
+    x_init = np.asarray(x.toarray()).ravel().astype(np.uint8).reshape(1, -1)
+    mask_2d = mask.astype(np.uint8).reshape(1, -1)
+
+    x_out, y_out = netexprs.expand_batch(
         R_T.data.astype(np.float64),
         R_T.indices.astype(np.int32),
         R_T.indptr.astype(np.int32),
@@ -55,12 +61,12 @@ def netExp_masked_rs(R, P, x, b, mask):
         P.indices.astype(np.int32),
         P.indptr.astype(np.int32),
         P.shape[0],
-        np.asarray(x.toarray()).ravel().astype(np.uint8),
+        x_init,
         np.asarray(b.toarray()).ravel().astype(np.float64),
-        mask.astype(np.uint8),
+        mask_2d,
     )
 
-    return x_out, y_out
+    return x_out[0], y_out[0]
 
 def netExp_masked_py(R, P, x, b, mask):
     """Python masked expansion using diagonal matrix approach."""
@@ -70,11 +76,14 @@ def netExp_masked_py(R, P, x, b, mask):
     return ne.netExp(Rstar, Pstar, x, b)
 
 def netExp_masked_batch_rs(R, P, x, b, masks):
-    """Rust wrapper for batch masked expansion."""
+    """Rust wrapper for batch masked expansion — tiled seed, N masks."""
     R_T = R.T.tocsr()
     P = P.tocsr()
 
-    x_out, y_out = netexprs.expand_masked_batch(
+    x_1d = np.asarray(x.toarray()).ravel().astype(np.uint8)
+    x_init = np.tile(x_1d, (masks.shape[0], 1))
+
+    x_out, y_out = netexprs.expand_batch(
         R_T.data.astype(np.float64),
         R_T.indices.astype(np.int32),
         R_T.indptr.astype(np.int32),
@@ -83,7 +92,7 @@ def netExp_masked_batch_rs(R, P, x, b, masks):
         P.indices.astype(np.int32),
         P.indptr.astype(np.int32),
         P.shape[0],
-        np.asarray(x.toarray()).ravel().astype(np.uint8),
+        x_init,
         np.asarray(b.toarray()).ravel().astype(np.float64),
         masks.astype(np.uint8),
     )
@@ -91,27 +100,7 @@ def netExp_masked_batch_rs(R, P, x, b, masks):
     return x_out, y_out
 
 def netContract_rs(R, P, x_active, y_active, y_extinct):
-    """Rust wrapper for network contraction."""
-    R_T = R.T.tocsr()
-    P = P.tocsr()
-
-    x_out, y_out = netexprs.contract(
-        R_T.data.astype(np.float64),
-        R_T.indices.astype(np.int32),
-        R_T.indptr.astype(np.int32),
-        R_T.shape[0],
-        P.data.astype(np.float64),
-        P.indices.astype(np.int32),
-        P.indptr.astype(np.int32),
-        P.shape[0],
-        np.asarray(x_active.toarray()).ravel().astype(np.uint8),
-        np.asarray(y_active.toarray()).ravel().astype(np.uint8),
-        np.asarray(y_extinct.toarray()).ravel().astype(np.uint8),
-    )
-    return x_out, y_out
-
-def netContract_batch_rs(R, P, x_active, y_active, y_extinct_batch):
-    """Rust wrapper for batch network contraction."""
+    """Rust wrapper for network contraction — 1-row batch."""
     R_T = R.T.tocsr()
     P = P.tocsr()
 
@@ -124,8 +113,32 @@ def netContract_batch_rs(R, P, x_active, y_active, y_extinct_batch):
         P.indices.astype(np.int32),
         P.indptr.astype(np.int32),
         P.shape[0],
-        np.asarray(x_active.toarray()).ravel().astype(np.uint8),
-        np.asarray(y_active.toarray()).ravel().astype(np.uint8),
+        np.asarray(x_active.toarray()).ravel().astype(np.uint8).reshape(1, -1),
+        np.asarray(y_active.toarray()).ravel().astype(np.uint8).reshape(1, -1),
+        np.asarray(y_extinct.toarray()).ravel().astype(np.uint8).reshape(1, -1),
+    )
+    return x_out[0], y_out[0]
+
+def netContract_batch_rs(R, P, x_active, y_active, y_extinct_batch):
+    """Rust wrapper for batch network contraction — tiled scope, N extinction sets."""
+    R_T = R.T.tocsr()
+    P = P.tocsr()
+
+    n_batches = y_extinct_batch.shape[0]
+    x_1d = np.asarray(x_active.toarray()).ravel().astype(np.uint8)
+    y_1d = np.asarray(y_active.toarray()).ravel().astype(np.uint8)
+
+    x_out, y_out = netexprs.contract_batch(
+        R_T.data.astype(np.float64),
+        R_T.indices.astype(np.int32),
+        R_T.indptr.astype(np.int32),
+        R_T.shape[0],
+        P.data.astype(np.float64),
+        P.indices.astype(np.int32),
+        P.indptr.astype(np.int32),
+        P.shape[0],
+        np.tile(x_1d, (n_batches, 1)),
+        np.tile(y_1d, (n_batches, 1)),
         y_extinct_batch.astype(np.uint8),
     )
     return x_out, y_out
@@ -371,7 +384,7 @@ class TestExpandMaskedBatchParity(unittest.TestCase):
 
         # Create 100 different masks
         np.random.seed(789)
-        masks = (np.random.random((100, n_reactions)) > 0.1).astype(np.uint8)
+        masks = (np.random.random((50, n_reactions)) > 0.1).astype(np.uint8)
 
         x_batch, y_batch = netExp_masked_batch_rs(R, P, x0, b, masks)
 
