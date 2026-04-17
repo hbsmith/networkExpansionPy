@@ -461,7 +461,7 @@ class TestRunExpansionsReactionMasksHighLevel(unittest.TestCase):
             [r for r in all_rxns if r[0] == 0],  # All variants of reaction 0
         ]
 
-        cpds_rust_list, rxns_rust_list = toy._run_expansions_reactionMasks_rust(seedSet, maskedSets)
+        cpds_rust_list, rxns_rust_list = toy.run_expansions_batch(seedSet, maskedSets)
         cpds_py_list, rxns_py_list = toy._run_expansions_reactionMasks_python(seedSet, maskedSets)
 
         self.assertEqual(len(cpds_rust_list), len(cpds_py_list))
@@ -496,7 +496,7 @@ class TestRunExpansionsReactionMasksHighLevelLargeNetwork(unittest.TestCase):
             rxns_removed = [r for r in self.all_rxns if r[0] in rxns_removed_base]
             maskedSets.append(rxns_removed)
 
-        cpds_rust_list, rxns_rust_list = self.kegg._run_expansions_reactionMasks_rust(
+        cpds_rust_list, rxns_rust_list = self.kegg.run_expansions_batch(
             self.seedSet, maskedSets)
         cpds_py_list, rxns_py_list = self.kegg._run_expansions_reactionMasks_python(
             self.seedSet, maskedSets)
@@ -523,7 +523,7 @@ class TestRunExpansionsReactionMasksHighLevelLargeNetwork(unittest.TestCase):
                 rxns_removed = [r for r in self.all_rxns if r[0] in rxns_removed_base]
                 maskedSets.append(rxns_removed)
 
-        cpds_rust_list, rxns_rust_list = self.kegg._run_expansions_reactionMasks_rust(
+        cpds_rust_list, rxns_rust_list = self.kegg.run_expansions_batch(
             self.seedSet, maskedSets)
         cpds_py_list, rxns_py_list = self.kegg._run_expansions_reactionMasks_python(
             self.seedSet, maskedSets)
@@ -546,7 +546,7 @@ class TestRunExpansionsReactionMasksHighLevelLargeNetwork(unittest.TestCase):
             rxns_removed = [r for r in self.all_rxns if r[0] in rxns_removed_base]
             maskedSets.append(rxns_removed)
 
-        cpds_rust_list, rxns_rust_list = self.kegg._run_expansions_reactionMasks_rust(
+        cpds_rust_list, rxns_rust_list = self.kegg.run_expansions_batch(
             self.seedSet, maskedSets)
         cpds_py_list, rxns_py_list = self.kegg._run_expansions_reactionMasks_python(
             self.seedSet, maskedSets)

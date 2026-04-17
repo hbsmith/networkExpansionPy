@@ -119,7 +119,7 @@ class TestExpandBatchLowLevel(unittest.TestCase):
 # ── expand_batch: high-level ─────────────────────────────────────────────
 
 class TestExpandHighLevel(unittest.TestCase):
-    """_expand_rust and _run_expansions_rust vs Python equivalents."""
+    """_expand_rust and run_expansions_batch vs Python equivalents."""
 
     @classmethod
     def setUpClass(cls):
@@ -149,7 +149,7 @@ class TestExpandHighLevel(unittest.TestCase):
         random_seed(42)
         seed_sets = [self.all_seeds, self.all_seeds[:10], sample(self.all_seeds, 20)]
 
-        cpds_r, rxns_r = self.kegg._run_expansions_rust(seed_sets, "naive")
+        cpds_r, rxns_r = self.kegg.run_expansions_batch(seed_sets, algorithm="naive")
         cpds_p, rxns_p = self.kegg._run_expansions_python(seed_sets, "naive")
 
         for i in range(len(seed_sets)):
@@ -168,7 +168,7 @@ class TestExpandHighLevel(unittest.TestCase):
             base = sample(network_rxns, n_remove)
             masked_sets.append([r for r in all_rxns if r[0] in base])
 
-        cpds_r, rxns_r = self.kegg._run_expansions_reactionMasks_rust(self.all_seeds, masked_sets)
+        cpds_r, rxns_r = self.kegg.run_expansions_batch(self.all_seeds, masked_sets)
         cpds_p, rxns_p = self.kegg._run_expansions_reactionMasks_python(self.all_seeds, masked_sets)
 
         for i in range(len(masked_sets)):
@@ -205,7 +205,7 @@ class TestExpandTraceParity(unittest.TestCase):
         random_seed(42)
         seed_sets = [self.all_seeds, self.all_seeds[:10], sample(self.all_seeds, 20)]
 
-        cpds_r, rxns_r = self.kegg._run_expansions_rust(seed_sets, "trace")
+        cpds_r, rxns_r = self.kegg.run_expansions_batch(seed_sets, algorithm="trace")
         cpds_p, rxns_p = self.kegg._run_expansions_python(seed_sets, "trace")
 
         for i in range(len(seed_sets)):

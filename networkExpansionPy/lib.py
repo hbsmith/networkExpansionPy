@@ -1052,57 +1052,111 @@ class GlobalMetabolicNetwork:
         reactions = self._y_to_reactions(y)
         return compounds, reactions
 
-    def run_expansions(self, seedSets, algorithm="naive"):
+    def run_expansions_batch(self, seedSets, maskedReactionSets=None, algorithm="naive"):
         """
-        Run expansion for multiple seed sets.
+        Run expansions with varying seeds and/or varying masks.
 
-        When Rust is available, all seed sets are batched into a single Rust
-        call parallelized via Rayon. Supports both 'naive' and 'trace'.
+        Accepts flexible input shapes — a single seed set or mask set is
+        broadcast across the other dimension automatically:
+
+            - N seed sets, no masks → N unmasked expansions
+            - N seed sets, N mask sets → N paired expansions
+            - 1 seed set, N mask sets → seed broadcast across all masks
+            - N seed sets, 1 mask set → mask broadcast across all seeds
 
         Args:
-            seedSets: List of seed sets (each is a list of compound IDs)
+            seedSets: A single seed set (list of compound IDs) or a list of seed sets.
+            maskedReactionSets: Optional. A single reaction set to remove, or a list
+                of reaction sets to remove. If a list, length must match seedSets
+                or be 1 (broadcast).
             algorithm: 'naive' or 'trace'
 
         Returns:
             For 'naive': (compoundScopes, reactionScopes) - lists of ID lists
             For 'trace': (compoundScopes, reactionScopes) - lists of {ID: iteration} dicts
         """
+        # ── Normalize inputs to lists of lists ──
+        # Detect single seed set: a flat list of compound IDs (strings)
+        if len(seedSets) > 0 and not isinstance(seedSets[0], (list, set, frozenset)):
+            seedSets = [seedSets]
+
+        if maskedReactionSets is not None:
+            if len(maskedReactionSets) > 0 and not isinstance(maskedReactionSets[0], (list, set, frozenset)):
+                maskedReactionSets = [maskedReactionSets]
+
+        # ── Broadcast to matching lengths ──
+        n_seeds = len(seedSets)
+        n_masks = len(maskedReactionSets) if maskedReactionSets is not None else 0
+
+        if maskedReactionSets is not None:
+            if n_seeds == 1 and n_masks > 1:
+                seedSets = seedSets * n_masks
+                n = n_masks
+            elif n_masks == 1 and n_seeds > 1:
+                maskedReactionSets = maskedReactionSets * n_seeds
+                n = n_seeds
+            elif n_seeds == n_masks:
+                n = n_seeds
+            else:
+                raise ValueError(
+                    f"seedSets (len {n_seeds}) and maskedReactionSets (len {n_masks}) "
+                    f"must have matching lengths, or one must have length 1."
+                )
+        else:
+            n = n_seeds
+
+        # ── Dispatch ──
         if _HAS_RUST and algorithm.lower() in ("naive", "trace"):
             _announce_rust()
-            return self._run_expansions_rust(seedSets, algorithm)
+            self._ensure_rust_ready()
+            ra = self._rust_arrays
+
+            x_init_batch = np.zeros((n, ra["n_compounds"]), dtype=np.uint8)
+            for i, s in enumerate(seedSets):
+                x_init_batch[i] = self.initialize_metabolite_vector(s).astype(np.uint8)
+
+            masks = None
+            if maskedReactionSets is not None:
+                masks = np.ones((n, ra["n_reactions"]), dtype=np.uint8)
+                for i, rxns_removed in enumerate(maskedReactionSets):
+                    exclude_vec = self.initialize_reaction_vector(rxns_removed).astype(np.uint8)
+                    masks[i] = 1 - exclude_vec
+
+            if algorithm.lower() == "trace":
+                c_iters, r_iters = self._call_expand_trace_batch(x_init_batch, masks)
+                compoundScopes = [self._iters_to_dict(c_iters[i], self.idx_to_cid) for i in range(n)]
+                reactionScopes = [self._iters_to_dict(r_iters[i], self.idx_to_rid) for i in range(n)]
+            else:
+                x_batch, y_batch = self._call_expand_batch(x_init_batch, masks)
+                compoundScopes = [self._x_to_compounds(x_batch[i]) for i in range(n)]
+                reactionScopes = [self._y_to_reactions(y_batch[i]) for i in range(n)]
+
+            return compoundScopes, reactionScopes
         else:
-            return self._run_expansions_python(seedSets, algorithm)
+            compoundScopes = []
+            reactionScopes = []
+            for i, seedSet in enumerate(seedSets):
+                excluded = maskedReactionSets[i] if maskedReactionSets else None
+                cpds, rxns = self._expand_python(seedSet, algorithm, excluded)
+                compoundScopes.append(cpds)
+                reactionScopes.append(rxns)
+            return compoundScopes, reactionScopes
+    
+    
+    def run_expansions(self, seedSets, algorithm="naive"):
+        """Run expansion for multiple seed sets.
 
-    def _run_expansions_rust(self, seedSets, algorithm="naive"):
-        """Rust-accelerated batch expansion over multiple seed sets.
-
-        Converts each seed set to a binary compound vector, stacks them into
-        an (N × n_compounds) matrix, and makes a single Rust call.
+        Delegates to run_expansions_batch with no masks.
         """
-        self._ensure_rust_ready()
-        ra = self._rust_arrays
+        return self.run_expansions_batch(seedSets, algorithm=algorithm)
 
-        n_seeds = len(seedSets)
-        x_init_batch = np.zeros((n_seeds, ra["n_compounds"]), dtype=np.uint8)
-        for i, seedSet in enumerate(seedSets):
-            x_init_batch[i] = self.initialize_metabolite_vector(seedSet).astype(np.uint8)
+    def run_expansions_reactionMasks(self, seedSet, maskedReactionSets):
+        """Run masked expansions with a shared seed set.
 
-        if algorithm.lower() == "trace":
-            c_iters, r_iters = self._call_expand_trace_batch(x_init_batch)
-            compoundScopes = []
-            reactionScopes = []
-            for i in range(n_seeds):
-                compoundScopes.append(self._iters_to_dict(c_iters[i], self.idx_to_cid))
-                reactionScopes.append(self._iters_to_dict(r_iters[i], self.idx_to_rid))
-        else:
-            x_batch, y_batch = self._call_expand_batch(x_init_batch)
-            compoundScopes = []
-            reactionScopes = []
-            for i in range(n_seeds):
-                compoundScopes.append(self._x_to_compounds(x_batch[i]))
-                reactionScopes.append(self._y_to_reactions(y_batch[i]))
-
-        return compoundScopes, reactionScopes
+        Delegates to run_expansions_batch — the single seed set is
+        automatically broadcast across all masks.
+        """
+        return self.run_expansions_batch(seedSet, maskedReactionSets)
 
     def _run_expansions_python(self, seedSets, algorithm="naive"):
         """Pure Python batch expansion."""
@@ -1137,6 +1191,41 @@ class GlobalMetabolicNetwork:
 
             compoundScopes.append(compounds)
             reactionScopes.append(reactions)
+        return compoundScopes, reactionScopes
+
+    def _run_expansions_reactionMasks_python(self, seedSet, maskedReactionSets):
+        """Pure Python batch masked expansion."""
+        self._ensure_dicts()
+
+        R, P = self.create_RP_from_irreversible_network()
+        b = sum(R)
+        # sparsefy data
+        R = csr_matrix(R)
+        P = csr_matrix(P)
+        b = csr_matrix(b)
+        b = b.transpose()
+
+        x0 = self.initialize_metabolite_vector(seedSet)
+        x0 = csr_matrix(x0)
+        x0 = x0.transpose()
+
+        compoundScopes = []
+        reactionScopes = []
+
+        for rxns_removed in maskedReactionSets:
+            # build new R and P matrices with Masks
+            exclude_vec = self.initialize_reaction_vector(rxns_removed)
+            reaction_mask = csr_matrix(np.diag(1 - exclude_vec))
+            Pstar = P * reaction_mask
+            Rstar = R * reaction_mask
+            # run expansion algorithm
+            x, y = netExp(Rstar, Pstar, x0, b)
+
+            compounds = self._x_to_compounds(x)
+            reactions = self._y_to_reactions(y)
+            compoundScopes.append(compounds)
+            reactionScopes.append(reactions)
+
         return compoundScopes, reactionScopes
 
     def run_contractions(
@@ -1229,92 +1318,6 @@ class GlobalMetabolicNetwork:
             X, Y = netContract(R, P, b, xactive, yactive, yextinct)
             x = X[-1]
             y = Y[-1]
-
-            compounds = self._x_to_compounds(x)
-            reactions = self._y_to_reactions(y)
-            compoundScopes.append(compounds)
-            reactionScopes.append(reactions)
-
-        return compoundScopes, reactionScopes
-
-    def run_expansions_reactionMasks(self, seedSet, maskedReactionSets):
-        """
-        Run masked expansions (reactions removed from network).
-
-        Args:
-            seedSet: List of compound IDs to start expansion from
-            maskedReactionSets: List of reaction sets to REMOVE (each is a list of reaction IDs)
-
-        Returns:
-            (compoundScopes, reactionScopes) - lists of results for each mask
-        """
-        if _HAS_RUST:
-            _announce_rust()
-            return self._run_expansions_reactionMasks_rust(seedSet, maskedReactionSets)
-        else:
-            return self._run_expansions_reactionMasks_python(
-                seedSet, maskedReactionSets
-            )
-
-    def _run_expansions_reactionMasks_rust(self, seedSet, maskedReactionSets):
-        """Rust-accelerated batch masked expansion.
-
-        Builds a (N × n_reactions) mask matrix (1=allowed, 0=excluded) and
-        tiles the seed vector into an (N × n_compounds) matrix, then makes
-        a single call to expand_batch.
-        """
-        self._ensure_rust_ready()
-        ra = self._rust_arrays
-
-        x0 = self.initialize_metabolite_vector(seedSet).astype(np.uint8)
-        n_masks = len(maskedReactionSets)
-
-        # Tile seed vector: same seeds for every mask
-        x_init_batch = np.tile(x0, (n_masks, 1))
-
-        # Build mask matrix
-        masks = np.ones((n_masks, ra["n_reactions"]), dtype=np.uint8)
-        for i, rxns_removed in enumerate(maskedReactionSets):
-            exclude_vec = self.initialize_reaction_vector(rxns_removed).astype(np.uint8)
-            masks[i] = 1 - exclude_vec
-
-        x_batch, y_batch = self._call_expand_batch(x_init_batch, masks)
-
-        compoundScopes = []
-        reactionScopes = []
-        for i in range(n_masks):
-            compoundScopes.append(self._x_to_compounds(x_batch[i]))
-            reactionScopes.append(self._y_to_reactions(y_batch[i]))
-
-        return compoundScopes, reactionScopes
-
-    def _run_expansions_reactionMasks_python(self, seedSet, maskedReactionSets):
-        """Pure Python batch masked expansion."""
-        self._ensure_dicts()
-
-        R, P = self.create_RP_from_irreversible_network()
-        b = sum(R)
-        # sparsefy data
-        R = csr_matrix(R)
-        P = csr_matrix(P)
-        b = csr_matrix(b)
-        b = b.transpose()
-
-        x0 = self.initialize_metabolite_vector(seedSet)
-        x0 = csr_matrix(x0)
-        x0 = x0.transpose()
-
-        compoundScopes = []
-        reactionScopes = []
-
-        for rxns_removed in maskedReactionSets:
-            # build new R and P matrices with Masks
-            exclude_vec = self.initialize_reaction_vector(rxns_removed)
-            reaction_mask = csr_matrix(np.diag(1 - exclude_vec))
-            Pstar = P * reaction_mask
-            Rstar = R * reaction_mask
-            # run expansion algorithm
-            x, y = netExp(Rstar, Pstar, x0, b)
 
             compounds = self._x_to_compounds(x)
             reactions = self._y_to_reactions(y)

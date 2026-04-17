@@ -106,8 +106,8 @@ class TestRustDispatch(unittest.TestCase):
         """run_expansions_reactionMasks() should call Rust backend when available."""
         mask_sets = [self.reaction_scope[:100], self.reaction_scope[:200]]
         
-        with patch.object(self.kegg, '_run_expansions_reactionMasks_rust', 
-                          wraps=self.kegg._run_expansions_reactionMasks_rust) as mock_rust, \
+        with patch.object(self.kegg, 'run_expansions_batch', 
+                          wraps=self.kegg.run_expansions_batch) as mock_rust, \
              patch.object(self.kegg, '_run_expansions_reactionMasks_python', 
                           wraps=self.kegg._run_expansions_reactionMasks_python) as mock_python:
             

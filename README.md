@@ -149,6 +149,15 @@ Contract network after removing reactions.
   - `extinctReactions`: List of reactions to remove
 - **Returns**: `(remaining_compounds, remaining_reactions)`
 
+#### `run_expansions_batch(seedSets, maskedReactionSets=None, algorithm='naive')`
+Most general batch expansion — supports varying seeds and/or varying masks, parallelized via Rust/Rayon when available. Inputs are broadcast automatically: a single seed set is broadcast across all masks, a single mask across all seeds, or paired N-to-N.
+- **Args**:
+  - `seedSets`: A single seed set or list of seed sets
+  - `maskedReactionSets`: Optional single reaction set or list of reaction sets to remove
+  - `algorithm`: `'naive'` or `'trace'`
+- **Returns**: `(compound_scopes, reaction_scopes)` - lists of results
+- **Note**: `run_expansions()` and `run_expansions_reactionMasks()` both delegate to this method.
+
 #### `run_expansions_reactionMasks_parallel(seedSet, maskedReactionSets)`
 Run multiple masked expansions in parallel.
 - **Args**:
