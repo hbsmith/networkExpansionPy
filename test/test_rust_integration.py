@@ -52,16 +52,16 @@ class TestRustDispatch(unittest.TestCase):
             mock_rust.assert_not_called()
             mock_python.assert_called_once()
     
-    def test_expand_dispatches_to_python_for_trace_algorithm(self):
-        """expand() should use Python for 'trace' algorithm even with Rust available."""
-        with patch.object(self.kegg, '_expand_rust', wraps=self.kegg._expand_rust) as mock_rust, \
+    def test_expand_dispatches_to_rust_for_trace_algorithm(self):
+        """expand() should use _expand_trace_rust for 'trace' algorithm with Rust available."""
+        with patch.object(self.kegg, '_expand_trace_rust', wraps=self.kegg._expand_trace_rust) as mock_trace, \
              patch.object(self.kegg, '_expand_python', wraps=self.kegg._expand_python) as mock_python:
-            
+
             with patch.object(ne, '_HAS_RUST', True):
                 self.kegg.expand(self.seeds, algorithm='trace')
-            
-            mock_rust.assert_not_called()
-            mock_python.assert_called_once()
+
+            mock_trace.assert_called_once()
+            mock_python.assert_not_called()
     
     def test_contract_dispatches_to_rust_when_available(self):
         """contract() should call _contract_rust when _HAS_RUST is True."""
