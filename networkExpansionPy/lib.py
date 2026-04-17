@@ -381,6 +381,12 @@ class GlobalMetabolicNetwork:
             self.rid_to_idx, self.idx_to_rid = self.create_reaction_dicts()
         if self.cid_to_idx is None or self.idx_to_cid is None:
             self.cid_to_idx, self.idx_to_cid = self.create_compound_dicts()
+        if not hasattr(self, '_cid_list') or self._cid_list is None:
+            self._cid_list = [self.idx_to_cid[i] for i in range(len(self.idx_to_cid))]
+        if not hasattr(self, '_rid_list') or self._rid_list is None:
+            self._rid_list = [self.idx_to_rid[i] for i in range(len(self.idx_to_rid))]
+        if not hasattr(self, '_cid_set') or self._cid_set is None:
+            self._cid_set = set(self.cid_to_idx.keys())
 
     def _ensure_rust_ready(self):
         """Lazily prepare arrays needed for Rust acceleration."""
@@ -424,6 +430,9 @@ class GlobalMetabolicNetwork:
         self.idx_to_rid = None
         self.cid_to_idx = None
         self.idx_to_cid = None
+        self._cid_list = None
+        self._rid_list = None
+        self._cid_set = None
 
         global _rust_announced
         _rust_announced = False
@@ -433,18 +442,18 @@ class GlobalMetabolicNetwork:
         if isinstance(x_arr, np.ndarray):
             cidx = np.nonzero(x_arr)[0]
         else:
-            # Handle sparse matrix
             cidx = np.nonzero(x_arr.toarray().ravel())[0]
-        return [self.idx_to_cid[i] for i in cidx]
+        cid_list = self._cid_list
+        return [cid_list[i] for i in cidx]
 
     def _y_to_reactions(self, y_arr):
         """Convert reaction boolean array to list of reaction IDs."""
         if isinstance(y_arr, np.ndarray):
             ridx = np.nonzero(y_arr)[0]
         else:
-            # Handle sparse matrix
             ridx = np.nonzero(y_arr.toarray().ravel())[0]
-        return [self.idx_to_rid[i] for i in ridx]
+        rid_list = self._rid_list
+        return [rid_list[i] for i in ridx]
 
     def _iters_to_dict(self, iter_arr, idx_to_id):
         """Convert a Rust iteration vector (int32) to {id: iteration} dict.
@@ -751,10 +760,10 @@ class GlobalMetabolicNetwork:
         if seedSet is None:
             print("No seed set")
         else:
-            x0 = np.zeros([len(self.cid_to_idx)], dtype=int)
-            for x in set(seedSet) & set(self.cid_to_idx.keys()):
-                # for x in set(map(tuple, seedSet)) & set(map(tuple, self.cid_to_idx.keys())):
-                x0[self.cid_to_idx[x]] = 1
+            x0 = np.zeros(len(self.cid_to_idx), dtype=int)
+            indices = [self.cid_to_idx[x] for x in set(seedSet) & self._cid_set]
+            if indices:
+                x0[indices] = 1
             return x0
 
     def initialize_reaction_vector(self, reactionSet):
