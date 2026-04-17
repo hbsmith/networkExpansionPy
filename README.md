@@ -24,7 +24,7 @@ pip install -e .
 
 ### Rust Acceleration (Recommended)
 
-For **50-100x speedup** on batch operations, install the optional Rust backend:
+For **50-1000x speedup** on batch operations, install the optional Rust backend:
 
 ```bash
 pip install netexprs
@@ -34,15 +34,18 @@ The package automatically detects and uses the Rust backend when available, with
 
 #### Performance Comparison
 
-Benchmarks on KEGG metabolic network (8,743 compounds, 18,940 reactions):
+Benchmarks on KEGG metabolic network (8,743 compounds, 18,940 reactions) using an 8-core system:
 
 | Operation | Python | Rust | Speedup |
 |-----------|--------|------|---------|
-| Batch Masked Expansion (n=10) | 21.6 s | 256 ms | **84x** |
-| Batch Contraction (n=10) | 3.52 s | 63 ms | **56x** |
-| Single Masked Expansion | 2.17 s | 36 ms | **61x** |
-| Single Expansion | 281 ms | 222 ms | 1.3x |
-| Single Contraction | 25 ms | 15 ms | 1.7x |
+| Single Expansion | 281 ms | 43 ms | **6.5x** |
+| Single Masked Expansion | 2.2 s | 10 ms | **214x** |
+| Batch Masked Expansion (n=10) | 34.2 s | 43 ms | **802x** |
+| Batch Multi-Seed Expansion (n=10) | 4.1 s | 46 ms | **89x** |
+| Single Trace | 316 ms | 45 ms | **7.1x** |
+| Batch Trace (n=10) | 4.5 s | 48 ms | **94x** |
+| Single Contraction | 34 ms | 3.3 ms | **10x** |
+| Batch Contraction (n=10) | 4.2 s | 4 ms | **1034x** |
 
 The Rust backend provides massive speedups for batch operations through parallel processing, making large-scale robustness analyses and parameter sweeps practical.
 
@@ -165,28 +168,13 @@ The package automatically selects the best available backend:
 
 | Condition | Backend Used |
 |-----------|--------------|
-| `netexprs` installed + naive algorithm | **Rust** (fast) |
+| `netexprs` installed + naive/trace algorithm | **Rust** (fast) |
 | `netexprs` not installed | Python |
-| Trace algorithm requested | Python |
+| `cr` or `step` algorithm requested | Python |
 
-You can check which backend is active:
+When Rust is active, you'll see a one-time `🦀 netexprs` message in your output on the first Rust-accelerated call.
 
-```python
-import networkExpansionPy.lib as ne
-
-if ne._HAS_RUST:
-    print("Using Rust acceleration")
-else:
-    print("Using pure Python")
-```
-
-### When Rust is NOT Used
-
-Even with `netexprs` installed, Python backend is used for:
-- **Trace algorithm**: Requires tracking iteration-by-iteration changes
-- **Multi-seed parallel expansions**: Not yet optimized in Rust
-
-All other operations use Rust when available.
+All batch operations (multi-seed, masked, trace, contraction) use Rust with Rayon parallelism when available.
 
 ## Data Files
 
