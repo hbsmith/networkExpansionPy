@@ -83,8 +83,8 @@ class TestExpandHighLevel(unittest.TestCase):
         # This should block C+D -> E,F, limiting the expansion
         rxns_to_exclude = [rid for rid in toy.rid_to_idx.keys() if rid[0] == 1]
 
-        cpds_rust, rxns_rust = toy._expand_rust(seedSet, reaction_mask=rxns_to_exclude)
-        cpds_py, rxns_py = toy._expand_python(seedSet, algorithm='naive', reaction_mask=rxns_to_exclude)
+        cpds_rust, rxns_rust = toy._expand_rust(seedSet, excluded_reactions=rxns_to_exclude)
+        cpds_py, rxns_py = toy._expand_python(seedSet, algorithm='naive', excluded_reactions=rxns_to_exclude)
 
         self.assertEqual(set(cpds_rust), set(cpds_py))
         self.assertEqual(set(rxns_rust), set(rxns_py))
@@ -102,9 +102,9 @@ class TestExpandHighLevel(unittest.TestCase):
         seedSet = ["A", "B", "D"]
 
         # Empty list means exclude nothing
-        cpds_rust_masked, rxns_rust_masked = toy._expand_rust(seedSet, reaction_mask=[])
-        cpds_rust_unmasked, rxns_rust_unmasked = toy._expand_rust(seedSet, reaction_mask=None)
-        cpds_py, rxns_py = toy._expand_python(seedSet, algorithm='naive', reaction_mask=[])
+        cpds_rust_masked, rxns_rust_masked = toy._expand_rust(seedSet, excluded_reactions=[])
+        cpds_rust_unmasked, rxns_rust_unmasked = toy._expand_rust(seedSet, excluded_reactions=None)
+        cpds_py, rxns_py = toy._expand_python(seedSet, algorithm='naive', excluded_reactions=[])
 
         # All three should produce the same results
         self.assertEqual(set(cpds_rust_masked), set(cpds_py))
@@ -149,8 +149,8 @@ class TestExpandHighLevelLargeNetwork(unittest.TestCase):
         n_exclude = len(all_rxns) // 10
         rxns_to_exclude = sample(all_rxns, n_exclude)
 
-        cpds_rust, rxns_rust = self.kegg._expand_rust(self.seedSet, reaction_mask=rxns_to_exclude)
-        cpds_py, rxns_py = self.kegg._expand_python(self.seedSet, algorithm='naive', reaction_mask=rxns_to_exclude)
+        cpds_rust, rxns_rust = self.kegg._expand_rust(self.seedSet, excluded_reactions=rxns_to_exclude)
+        cpds_py, rxns_py = self.kegg._expand_python(self.seedSet, algorithm='naive', excluded_reactions=rxns_to_exclude)
 
         self.assertEqual(set(cpds_rust), set(cpds_py))
         self.assertEqual(set(rxns_rust), set(rxns_py))
