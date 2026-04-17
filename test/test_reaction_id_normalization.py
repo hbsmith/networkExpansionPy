@@ -5,12 +5,12 @@ Background
 ----------
 After convertToIrreversible(), rid_to_idx is keyed by (rn_id, direction)
 tuples such as ("R00001", "forward").  Before this fix, passing plain string
-IDs (e.g. "R00001") to initialize_reaction_vector() or expand(reaction_mask=…)
+IDs (e.g. "R00001") to initialize_reaction_vector() or expand(excluded_reactions=…)
 would silently produce an all-zero vector, meaning no masking was applied.
 
 These tests verify:
   1. initialize_reaction_vector() accepts both tuple and string IDs.
-  2. expand(reaction_mask=…) correctly excludes reactions whether string or
+  2. expand(excluded_reactions=…) correctly excludes reactions whether string or
      tuple IDs are supplied, for both the Rust and Python backends.
   3. run_contractions() and contract() continue to work with tuple IDs
      (regression guard).
@@ -144,11 +144,11 @@ class TestInitializeReactionVector(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# expand(reaction_mask=...) — both backends
+# expand(excluded_reactions=...) — both backends
 # ---------------------------------------------------------------------------
 
 class TestExpandReactionMask(unittest.TestCase):
-    """expand() with reaction_mask must produce different results when a mask
+    """expand() with excluded_reactions must produce different results when a mask
     is supplied, regardless of whether string or tuple IDs are used."""
 
     def setUp(self):
@@ -171,7 +171,7 @@ class TestExpandReactionMask(unittest.TestCase):
         mask = _reaction_string_ids(self.toy)  # mask ALL reactions
         with patch.object(ne, "_HAS_RUST", False):
             cpds, rxns = self.toy.expand(self.seeds, algorithm="naive",
-                                          reaction_mask=mask)
+                                          excluded_reactions=mask)
         # With all reactions masked, scope should shrink
         self.assertLessEqual(len(rxns), len(self.base_rxns),
             "Masking all reactions (string IDs, Python) had no effect")
@@ -181,7 +181,7 @@ class TestExpandReactionMask(unittest.TestCase):
         mask = _reaction_tuple_ids(self.toy)  # mask ALL reactions
         with patch.object(ne, "_HAS_RUST", False):
             cpds, rxns = self.toy.expand(self.seeds, algorithm="naive",
-                                          reaction_mask=mask)
+                                          excluded_reactions=mask)
         self.assertLessEqual(len(rxns), len(self.base_rxns))
 
     def test_string_mask_python_equals_tuple_mask_python(self):
@@ -192,9 +192,9 @@ class TestExpandReactionMask(unittest.TestCase):
 
         with patch.object(ne, "_HAS_RUST", False):
             cpds_str, rxns_str = self.toy.expand(self.seeds, algorithm="naive",
-                                                   reaction_mask=string_mask)
+                                                   excluded_reactions=string_mask)
             cpds_tup, rxns_tup = self.toy.expand(self.seeds, algorithm="naive",
-                                                   reaction_mask=tuple_mask)
+                                                   excluded_reactions=tuple_mask)
 
         self.assertEqual(sorted(cpds_str), sorted(cpds_tup))
         self.assertEqual(sorted(str(r) for r in rxns_str),
@@ -208,7 +208,7 @@ class TestExpandReactionMask(unittest.TestCase):
         mask = _reaction_string_ids(self.toy)
         with patch.object(ne, "_HAS_RUST", True):
             cpds, rxns = self.toy.expand(self.seeds, algorithm="naive",
-                                          reaction_mask=mask)
+                                          excluded_reactions=mask)
         self.assertLessEqual(len(rxns), len(self.base_rxns),
             "Masking all reactions (string IDs, Rust) had no effect")
 
@@ -221,9 +221,9 @@ class TestExpandReactionMask(unittest.TestCase):
 
         with patch.object(ne, "_HAS_RUST", True):
             cpds_str, rxns_str = self.toy.expand(self.seeds, algorithm="naive",
-                                                   reaction_mask=string_mask)
+                                                   excluded_reactions=string_mask)
             cpds_tup, rxns_tup = self.toy.expand(self.seeds, algorithm="naive",
-                                                   reaction_mask=tuple_mask)
+                                                   excluded_reactions=tuple_mask)
 
         self.assertEqual(sorted(cpds_str), sorted(cpds_tup))
         self.assertEqual(sorted(str(r) for r in rxns_str),
@@ -237,10 +237,10 @@ class TestExpandReactionMask(unittest.TestCase):
 
         with patch.object(ne, "_HAS_RUST", False):
             cpds_py, rxns_py = self.toy.expand(self.seeds, algorithm="naive",
-                                                reaction_mask=mask)
+                                                excluded_reactions=mask)
         with patch.object(ne, "_HAS_RUST", True):
             cpds_rs, rxns_rs = self.toy.expand(self.seeds, algorithm="naive",
-                                                reaction_mask=mask)
+                                                excluded_reactions=mask)
 
         self.assertEqual(sorted(cpds_py), sorted(cpds_rs))
         self.assertEqual(sorted(str(r) for r in rxns_py),
@@ -252,14 +252,14 @@ class TestExpandReactionMask(unittest.TestCase):
         """An empty mask must not change results."""
         with patch.object(ne, "_HAS_RUST", False):
             cpds, rxns = self.toy.expand(self.seeds, algorithm="naive",
-                                          reaction_mask=[])
+                                          excluded_reactions=[])
         self.assertEqual(sorted(cpds), sorted(self.base_cpds))
 
     def test_none_mask_equals_unmasked(self):
-        """reaction_mask=None must be equivalent to no mask."""
+        """excluded_reactions=None must be equivalent to no mask."""
         with patch.object(ne, "_HAS_RUST", False):
             cpds, rxns = self.toy.expand(self.seeds, algorithm="naive",
-                                          reaction_mask=None)
+                                          excluded_reactions=None)
         self.assertEqual(sorted(cpds), sorted(self.base_cpds))
 
 
