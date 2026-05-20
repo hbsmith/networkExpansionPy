@@ -117,6 +117,24 @@ remaining_compounds, remaining_reactions = kegg.contract(
 print(f"After extinction: {len(remaining_compounds)} compounds remain")
 ```
 
+### Contraction + Re-expansion (Fast Path)
+
+For large-scale robustness analyses, use the fused method to avoid ID conversion overhead:
+
+```python
+# 1000 random extinction sets
+import random
+all_rxns = list(kegg.rid_to_idx.keys())
+extinct_sets = [random.sample(all_rxns, 500) for _ in range(1000)]
+
+# One call: contract + re-expand, returns raw numpy arrays
+result = kegg.contract_and_reexpand(seeds, reaction_scope, compound_scope, extinct_sets)
+
+# Extract counts directly — no Python ID lookups
+cpd_counts_contracted = result['x_contracted'].sum(axis=1)   # (1000,)
+cpd_counts_reexpanded = result['x_reexpanded'].sum(axis=1)   # (1000,)
+```
+
 ### Trace Algorithm
 
 Track compound and reaction addition at each iteration:
@@ -173,6 +191,26 @@ Run multiple contractions in parallel.
   - `compoundScope`: Full compound scope before contraction
   - `extinctReactionSets`: List of extinction sets (each is a list of reaction IDs to remove)
 - **Returns**: `(compound_scopes, reaction_scopes)` - lists of results
+
+#### `contract_and_reexpand(seedSet, reactionScope, compoundScope, extinctReactionSets)`
+Fused contraction + re-expansion in a single call, without intermediate ID conversion. Contracts the network under each extinction set, then re-expands from the surviving compounds using the same masks. All marshalling stays in numpy — ideal for large batches where you only need counts.
+- **Args**:
+  - `seedSet`: Seed compounds to preserve during contraction
+  - `reactionScope`: Full reaction scope before contraction
+  - `compoundScope`: Full compound scope before contraction
+  - `extinctReactionSets`: List of extinction sets (used for both contraction and re-expansion masks)
+- **Returns**: dict with `'x_contracted'`, `'y_contracted'`, `'x_reexpanded'`, `'y_reexpanded'` — all `(N × n_compounds/n_reactions)` uint8 numpy arrays
+- **Note**: Requires the Rust backend (`netexprs`).
+
+#### `initialize_reaction_matrix(reaction_id_sets)`
+Batch version of `initialize_reaction_vector()`. Converts a list of reaction ID sets to a 2D binary matrix in one call.
+- **Args**: `reaction_id_sets` — list of lists/sets of reaction IDs
+- **Returns**: `(N × n_reactions)` uint8 numpy array
+
+#### `initialize_metabolite_matrix(compound_id_sets)`
+Batch version of `initialize_metabolite_vector()`. Converts a list of compound ID sets to a 2D binary matrix in one call.
+- **Args**: `compound_id_sets` — list of lists/sets of compound IDs
+- **Returns**: `(N × n_compounds)` uint8 numpy array
 
 ## Backend Selection
 

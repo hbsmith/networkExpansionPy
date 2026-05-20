@@ -477,14 +477,18 @@ class GlobalMetabolicNetwork:
         }
 
     def _call_expand_batch(self, x_init_batch, masks=None):
-        """Call netexprs.expand_batch with cached CSR arrays.
+        """Low-level batch expansion on raw numpy arrays (no ID conversion).
+
+        Use this to chain operations without marshalling overhead. Build input
+        arrays via initialize_metabolite_vector/matrix and
+        initialize_reaction_vector/matrix, then pass uint8 arrays directly.
 
         Args:
-            x_init_batch: (N × n_compounds) uint8 array
-            masks: optional (N × n_reactions) uint8 array
+            x_init_batch: (N × n_compounds) uint8 — seed compounds per row
+            masks: optional (N × n_reactions) uint8 — 1=allowed, 0=masked
 
         Returns:
-            (x_batch, y_batch) — 2D numpy arrays
+            (x_batch, y_batch) — (N × n_compounds) and (N × n_reactions) uint8
         """
         self._ensure_rust_ready()
         ra = self._rust_arrays
@@ -513,16 +517,21 @@ class GlobalMetabolicNetwork:
         )
 
     def _call_contract_batch(self, x_active_batch, y_active_batch, y_extinct_batch, x_seeds=None):
-        """Call netexprs.contract_batch with cached CSR arrays.
+        """Low-level batch contraction on raw numpy arrays (no ID conversion).
+
+        Use this to chain operations without marshalling overhead. Build input
+        arrays via initialize_metabolite_vector/matrix and
+        initialize_reaction_vector/matrix, then pass uint8 arrays directly.
 
         Args:
-            x_active_batch: (N × n_compounds) uint8 array
-            y_active_batch: (N × n_reactions) uint8 array
-            y_extinct_batch: (N × n_reactions) uint8 array
-            x_seeds: optional (n_compounds,) uint8 array — seed compounds preserved each iteration
+            x_active_batch: (N × n_compounds) uint8 — compound scope per row
+            y_active_batch: (N × n_reactions) uint8 — reaction scope per row
+            y_extinct_batch: (N × n_reactions) uint8 — 1=extinct, 0=active
+            x_seeds: optional (n_compounds,) uint8 — seed compounds preserved
+                each iteration (1D, shared across all batch rows)
 
         Returns:
-            (x_batch, y_batch) — 2D numpy arrays
+            (x_batch, y_batch) — (N × n_compounds) and (N × n_reactions) uint8
         """
         self._ensure_rust_ready()
         ra = self._rust_arrays
@@ -808,6 +817,56 @@ class GlobalMetabolicNetwork:
                     if key in self.rid_to_idx:
                         x0[self.rid_to_idx[key]] = 1
         return x0
+
+    def initialize_reaction_matrix(self, reaction_id_sets):
+        """Convert a list of reaction ID sets to a 2D binary matrix.
+
+        Batch version of initialize_reaction_vector(). Each row corresponds to
+        one set, using the same ID normalization rules (plain string expands to
+        both forward and reverse directed copies).
+
+        Args:
+            reaction_id_sets: list of lists/sets of reaction IDs
+
+        Returns:
+            (N × n_reactions) uint8 numpy array
+        """
+        self._ensure_dicts()
+        n = len(reaction_id_sets)
+        mat = np.zeros((n, len(self.rid_to_idx)), dtype=np.uint8)
+        rid_to_idx = self.rid_to_idx
+        for i, id_set in enumerate(reaction_id_sets):
+            for rid in id_set:
+                if rid in rid_to_idx:
+                    mat[i, rid_to_idx[rid]] = 1
+                else:
+                    for direction in ("forward", "reverse"):
+                        key = (rid, direction)
+                        if key in rid_to_idx:
+                            mat[i, rid_to_idx[key]] = 1
+        return mat
+
+    def initialize_metabolite_matrix(self, compound_id_sets):
+        """Convert a list of compound ID sets to a 2D binary matrix.
+
+        Batch version of initialize_metabolite_vector().
+
+        Args:
+            compound_id_sets: list of lists/sets of compound IDs
+
+        Returns:
+            (N × n_compounds) uint8 numpy array
+        """
+        self._ensure_dicts()
+        n = len(compound_id_sets)
+        mat = np.zeros((n, len(self.cid_to_idx)), dtype=np.uint8)
+        cid_to_idx = self.cid_to_idx
+        cid_set = self._cid_set
+        for i, id_set in enumerate(compound_id_sets):
+            indices = [cid_to_idx[x] for x in set(id_set) & cid_set]
+            if indices:
+                mat[i, indices] = 1
+        return mat
 
     def create_reaction_dicts(self):
         rids = set(zip(self.network["rn"], self.network["direction"]))
@@ -1365,6 +1424,70 @@ class GlobalMetabolicNetwork:
             reactionScopes.append(reactions)
 
         return compoundScopes, reactionScopes
+
+    def contract_and_reexpand(
+        self, seedSet, reactionScope, compoundScope, extinctReactionSets
+    ):
+        """Contract and re-expand in one call, without intermediate ID conversion.
+
+        This is the fast path for the common pattern of contracting a network
+        scope under multiple extinction sets, then re-expanding from the
+        surviving compounds. All marshalling between contraction output and
+        expansion input stays in numpy — no Python ID strings are allocated
+        until the final output.
+
+        The same extinction sets are used for both contraction and re-expansion
+        (as masks). Extra extinct reactions that aren't in scope have no effect
+        on contraction results.
+
+        Args:
+            seedSet: Seed compounds preserved during contraction.
+            reactionScope: Reaction IDs in the current scope.
+            compoundScope: Compound IDs in the current scope.
+            extinctReactionSets: List of reaction ID sets to remove.
+
+        Returns:
+            dict with keys:
+                'x_contracted': (N × n_compounds) uint8 — post-contraction compounds
+                'y_contracted': (N × n_reactions) uint8 — post-contraction reactions
+                'x_reexpanded': (N × n_compounds) uint8 — post-re-expansion compounds
+                'y_reexpanded': (N × n_reactions) uint8 — post-re-expansion reactions
+        """
+        if not _HAS_RUST:
+            raise RuntimeError("contract_and_reexpand requires the netexprs Rust backend")
+
+        _announce_rust()
+        self._ensure_rust_ready()
+        ra = self._rust_arrays
+        n_batches = len(extinctReactionSets)
+
+        # Marshal inputs once
+        x_active = self.initialize_metabolite_vector(compoundScope).astype(np.uint8)
+        y_active = self.initialize_reaction_vector(reactionScope).astype(np.uint8)
+        y_extinct_batch = self.initialize_reaction_matrix(extinctReactionSets)
+
+        x_seeds = None
+        if seedSet is not None:
+            x_seeds = self.initialize_metabolite_vector(seedSet).astype(np.uint8)
+
+        # Contraction
+        x_contracted, y_contracted = self._call_contract_batch(
+            np.tile(x_active, (n_batches, 1)),
+            np.tile(y_active, (n_batches, 1)),
+            y_extinct_batch,
+            x_seeds,
+        )
+
+        # Re-expansion: seeds are the contracted compound sets, masks invert extinction
+        masks = (1 - y_extinct_batch).astype(np.uint8)
+        x_reexpanded, y_reexpanded = self._call_expand_batch(x_contracted, masks)
+
+        return {
+            'x_contracted': x_contracted,
+            'y_contracted': y_contracted,
+            'x_reexpanded': x_reexpanded,
+            'y_reexpanded': y_reexpanded,
+        }
 
     def ne_output_to_graph(self, cpds, rxns):
         # build a network constructing metabolites from prior iteration to connecting subsequent iteration
