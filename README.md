@@ -143,7 +143,7 @@ Run network expansion from seed compounds.
 #### `contract(seedSet, reactionScope, compoundScope, extinctReactions)`
 Contract network after removing reactions.
 - **Args**:
-  - `seedSet`: Initial seed compounds
+  - `seedSet`: Seed compounds to preserve during contraction. These are compounds that entered the network as initial conditions and aren't produced by any reaction — they remain available regardless of which reactions go extinct.
   - `reactionScope`: Full reaction scope before contraction
   - `compoundScope`: Full compound scope before contraction
   - `extinctReactions`: List of reactions to remove
@@ -168,7 +168,10 @@ Run multiple masked expansions in parallel.
 #### `run_contractions(seedSet, reactionScope, compoundScope, extinctReactionSets)`
 Run multiple contractions in parallel.
 - **Args**:
-  - Similar to contract but accepts list of extinction sets
+  - `seedSet`: Seed compounds to preserve (same across all batch rows)
+  - `reactionScope`: Full reaction scope before contraction
+  - `compoundScope`: Full compound scope before contraction
+  - `extinctReactionSets`: List of extinction sets (each is a list of reaction IDs to remove)
 - **Returns**: `(compound_scopes, reaction_scopes)` - lists of results
 
 ## Backend Selection
