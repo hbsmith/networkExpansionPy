@@ -119,10 +119,13 @@ print(f"After extinction: {len(remaining_compounds)} compounds remain")
 
 ### Contraction + Re-expansion (Fast Path)
 
-For large-scale robustness analyses, use the fused method to avoid ID conversion overhead:
+For large-scale robustness analyses, use the fused method to avoid ID conversion overhead.
+A single `extinctReactionSets` argument is used for both phases — no scope-intersection
+needed. Contraction only operates on reactions in `reactionScope`, so extra reactions
+outside scope have no effect. For re-expansion the full set is the correct mask.
 
 ```python
-# 1000 random extinction sets
+# 1000 random extinction sets (full, un-intersected — that's fine)
 import random
 all_rxns = list(kegg.rid_to_idx.keys())
 extinct_sets = [random.sample(all_rxns, 500) for _ in range(1000)]
@@ -133,6 +136,13 @@ result = kegg.contract_and_reexpand(seeds, reaction_scope, compound_scope, extin
 # Extract counts directly — no Python ID lookups
 cpd_counts_contracted = result['x_contracted'].sum(axis=1)   # (1000,)
 cpd_counts_reexpanded = result['x_reexpanded'].sum(axis=1)   # (1000,)
+
+# Recover ID lists for specific rows when needed
+o2_cpds = kegg._x_to_compounds(result['x_reexpanded'][0])
+o2_rxns = kegg._y_to_reactions(result['y_reexpanded'][0])
+
+# Null presence matrix (how many replicates include each compound)
+null_cpd_presence = result['x_reexpanded'][1:].sum(axis=0)   # (n_compounds,)
 ```
 
 ### Trace Algorithm
@@ -198,8 +208,9 @@ Fused contraction + re-expansion in a single call, without intermediate ID conve
   - `seedSet`: Seed compounds to preserve during contraction
   - `reactionScope`: Full reaction scope before contraction
   - `compoundScope`: Full compound scope before contraction
-  - `extinctReactionSets`: List of extinction sets (used for both contraction and re-expansion masks)
+  - `extinctReactionSets`: List of extinction sets (used for both contraction and re-expansion masks). No scope-intersection needed — contraction only operates on reactions in `reactionScope`, so extra reactions outside scope have no effect. For re-expansion the full set is wanted as the mask.
 - **Returns**: dict with `'x_contracted'`, `'y_contracted'`, `'x_reexpanded'`, `'y_reexpanded'` — all `(N × n_compounds/n_reactions)` uint8 numpy arrays
+- **Recovering IDs**: Call `_x_to_compounds(result['x_reexpanded'][i])` or `_y_to_reactions(result['y_reexpanded'][i])` on any row you need as a list of IDs. For counts or presence matrices, operate directly on the arrays (e.g., `.sum(axis=1)`).
 - **Note**: Requires the Rust backend (`netexprs`).
 
 #### `initialize_reaction_matrix(reaction_id_sets)`

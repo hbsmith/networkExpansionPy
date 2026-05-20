@@ -1434,17 +1434,38 @@ class GlobalMetabolicNetwork:
         scope under multiple extinction sets, then re-expanding from the
         surviving compounds. All marshalling between contraction output and
         expansion input stays in numpy — no Python ID strings are allocated
-        until the final output.
+        unless you choose to convert specific rows afterward.
 
-        The same extinction sets are used for both contraction and re-expansion
-        (as masks). Extra extinct reactions that aren't in scope have no effect
-        on contraction results.
+        **Why one extinction set works for both phases:** Contraction only
+        operates on reactions present in ``reactionScope`` (y_active). Marking
+        reactions outside the current scope as extinct has no effect — they're
+        already inactive. So passing the full (un-intersected) extinction sets
+        is equivalent to scope-intersecting them first. For re-expansion, you
+        *want* the full set masked (reactions not yet in scope should stay
+        masked). A single ``extinctReactionSets`` argument therefore produces
+        correct behavior for both phases without manual scope-intersection.
+
+        **Recovering ID lists from the output:** The returned arrays can be
+        converted to compound/reaction ID lists for any row using
+        ``_x_to_compounds`` / ``_y_to_reactions``::
+
+            result = metabolism.contract_and_reexpand(...)
+            cpds_row0 = metabolism._x_to_compounds(result['x_reexpanded'][0])
+            rxns_row0 = metabolism._y_to_reactions(result['y_reexpanded'][0])
+
+        Only pay the conversion cost for rows you actually need. For aggregate
+        statistics (counts, presence matrices), operate directly on the arrays::
+
+            counts = result['x_reexpanded'].sum(axis=1)          # (N,)
+            presence = result['x_reexpanded'][1:].sum(axis=0)    # (n_compounds,)
 
         Args:
             seedSet: Seed compounds preserved during contraction.
             reactionScope: Reaction IDs in the current scope.
             compoundScope: Compound IDs in the current scope.
-            extinctReactionSets: List of reaction ID sets to remove.
+            extinctReactionSets: List of reaction ID sets to remove. Used as-is
+                for both contraction (extinct vector) and re-expansion (inverted
+                to a keep-mask). No scope-intersection needed.
 
         Returns:
             dict with keys:
