@@ -119,7 +119,7 @@ def netExp_trace(R, P, x, b):
     return X, Y
 
 
-def netContract(R, P, b, x_ac, y, yext):
+def netContract(R, P, b, x_ac, y, yext, x_seeds=None):
     # code for running network contraction algorithm
     Xac = []
     Yac = []
@@ -132,15 +132,25 @@ def netContract(R, P, b, x_ac, y, yext):
     yactive = yext.__lt__(1).multiply(y)
     k0 = yactive.sum()
     Yac.append(yactive)
+
+    # If no reactions are active, only seeds survive
+    if k0 == 0 and x_seeds is not None:
+        Xac.append(x_seeds)
+        Yac.append(yactive)
+        return Xac, Yac
+
     k = 0
     while k < k0:
         # find
         k0 = yactive.sum()
         x_ex = np.dot(P, yext).astype("bool").astype("int")
         x_ac = np.dot(P, yactive).astype("bool").astype("int")
-        # find all extinct metabolites
-        # x_ex = csr_matrix(np.multiply((x_ex.toarray()),1-x_ac.toarray()))
 
+        # Preserve seed compounds
+        if x_seeds is not None:
+            x_ac = (x_ac + x_seeds).astype("bool").astype("int")
+
+        # find all extinct metabolites
         # metabolite has to be not active and extinct
         x_ex = x_ac.__lt__(1).multiply(x_ex)
 
@@ -502,13 +512,14 @@ class GlobalMetabolicNetwork:
             x_init_batch, ra["b"], masks,
         )
 
-    def _call_contract_batch(self, x_active_batch, y_active_batch, y_extinct_batch):
+    def _call_contract_batch(self, x_active_batch, y_active_batch, y_extinct_batch, x_seeds=None):
         """Call netexprs.contract_batch with cached CSR arrays.
 
         Args:
             x_active_batch: (N × n_compounds) uint8 array
             y_active_batch: (N × n_reactions) uint8 array
             y_extinct_batch: (N × n_reactions) uint8 array
+            x_seeds: optional (n_compounds,) uint8 array — seed compounds preserved each iteration
 
         Returns:
             (x_batch, y_batch) — 2D numpy arrays
@@ -518,7 +529,7 @@ class GlobalMetabolicNetwork:
         return netexprs.contract_batch(
             ra["rt_data"], ra["rt_indices"], ra["rt_indptr"], ra["n_reactions"],
             ra["p_data"], ra["p_indices"], ra["p_indptr"], ra["n_compounds"],
-            x_active_batch, y_active_batch, y_extinct_batch,
+            x_active_batch, y_active_batch, y_extinct_batch, x_seeds,
         )
 
     def copy(self):
@@ -1001,7 +1012,9 @@ class GlobalMetabolicNetwork:
         Run network contraction starting from an expanded scope.
 
         Args:
-            seedSet: Original seed set (unused in contraction, kept for API compatibility)
+            seedSet: List of compound IDs that are always available (preserved
+                during contraction). These are compounds that entered the network
+                as initial conditions and aren't produced by any reaction.
             reactionScope: List of reaction IDs in the current scope
             compoundScope: List of compound IDs in the current scope
             extinctReactions: List of reaction IDs to remove (extinct)
@@ -1011,11 +1024,11 @@ class GlobalMetabolicNetwork:
         """
         if _HAS_RUST:
             _announce_rust()
-            return self._contract_rust(reactionScope, compoundScope, extinctReactions)
+            return self._contract_rust(reactionScope, compoundScope, extinctReactions, seedSet)
         else:
-            return self._contract_python(reactionScope, compoundScope, extinctReactions)
+            return self._contract_python(reactionScope, compoundScope, extinctReactions, seedSet)
 
-    def _contract_rust(self, reactionScope, compoundScope, extinctReactions):
+    def _contract_rust(self, reactionScope, compoundScope, extinctReactions, seedSet=None):
         """Rust-accelerated contraction (single, via 1-row batch)."""
         self._ensure_rust_ready()
         ra = self._rust_arrays
@@ -1024,13 +1037,17 @@ class GlobalMetabolicNetwork:
         y_active = self.initialize_reaction_vector(reactionScope).astype(np.uint8).reshape(1, -1)
         y_extinct = self.initialize_reaction_vector(extinctReactions).astype(np.uint8).reshape(1, -1)
 
-        x_batch, y_batch = self._call_contract_batch(x_active, y_active, y_extinct)
+        x_seeds = None
+        if seedSet is not None:
+            x_seeds = self.initialize_metabolite_vector(seedSet).astype(np.uint8)
+
+        x_batch, y_batch = self._call_contract_batch(x_active, y_active, y_extinct, x_seeds)
 
         compounds = self._x_to_compounds(x_batch[0])
         reactions = self._y_to_reactions(y_batch[0])
         return compounds, reactions
 
-    def _contract_python(self, reactionScope, compoundScope, extinctReactions):
+    def _contract_python(self, reactionScope, compoundScope, extinctReactions, seedSet=None):
         """Pure Python contraction."""
         self._ensure_dicts()
 
@@ -1052,8 +1069,12 @@ class GlobalMetabolicNetwork:
         yactive = csr_matrix(yactive).transpose()
         yextinct = csr_matrix(yextinct).transpose()
 
+        x_seeds = None
+        if seedSet is not None:
+            x_seeds = csr_matrix(self.initialize_metabolite_vector(seedSet)).transpose()
+
         # run contraction algorithm
-        X, Y = netContract(R, P, b, xactive, yactive, yextinct)
+        X, Y = netContract(R, P, b, xactive, yactive, yextinct, x_seeds)
         x = X[-1]
         y = Y[-1]
 
@@ -1244,7 +1265,9 @@ class GlobalMetabolicNetwork:
         Run contraction for multiple extinction sets.
 
         Args:
-            seedSet: Original seed set (unused, kept for API compatibility)
+            seedSet: List of compound IDs that are always available (preserved
+                during contraction). These are compounds that entered the network
+                as initial conditions and aren't produced by any reaction.
             reactionScope: List of reaction IDs in the current scope
             compoundScope: List of compound IDs in the current scope
             extinctReactionSets: List of extinction sets (each is a list of reaction IDs to remove)
@@ -1255,14 +1278,14 @@ class GlobalMetabolicNetwork:
         if _HAS_RUST:
             _announce_rust()
             return self._run_contractions_rust(
-                reactionScope, compoundScope, extinctReactionSets
+                reactionScope, compoundScope, extinctReactionSets, seedSet
             )
         else:
             return self._run_contractions_python(
-                reactionScope, compoundScope, extinctReactionSets
+                reactionScope, compoundScope, extinctReactionSets, seedSet
             )
 
-    def _run_contractions_rust(self, reactionScope, compoundScope, extinctReactionSets):
+    def _run_contractions_rust(self, reactionScope, compoundScope, extinctReactionSets, seedSet=None):
         """Rust-accelerated batch contraction.
 
         x_active and y_active are the same for every batch row (shared scope),
@@ -1285,7 +1308,11 @@ class GlobalMetabolicNetwork:
         for i, extinctReactions in enumerate(extinctReactionSets):
             y_extinct_batch[i] = self.initialize_reaction_vector(extinctReactions).astype(np.uint8)
 
-        x_batch, y_batch = self._call_contract_batch(x_active_batch, y_active_batch, y_extinct_batch)
+        x_seeds = None
+        if seedSet is not None:
+            x_seeds = self.initialize_metabolite_vector(seedSet).astype(np.uint8)
+
+        x_batch, y_batch = self._call_contract_batch(x_active_batch, y_active_batch, y_extinct_batch, x_seeds)
 
         compoundScopes = []
         reactionScopes = []
@@ -1296,7 +1323,7 @@ class GlobalMetabolicNetwork:
         return compoundScopes, reactionScopes
 
     def _run_contractions_python(
-        self, reactionScope, compoundScope, extinctReactionSets
+        self, reactionScope, compoundScope, extinctReactionSets, seedSet=None
     ):
         """Pure Python batch contraction."""
         self._ensure_dicts()
@@ -1317,6 +1344,10 @@ class GlobalMetabolicNetwork:
         xactive = csr_matrix(xactive).transpose()
         yactive = csr_matrix(yactive).transpose()
 
+        x_seeds = None
+        if seedSet is not None:
+            x_seeds = csr_matrix(self.initialize_metabolite_vector(seedSet)).transpose()
+
         compoundScopes = []
         reactionScopes = []
 
@@ -1324,7 +1355,7 @@ class GlobalMetabolicNetwork:
             yextinct = self.initialize_reaction_vector(extinctReactions)
             yextinct = csr_matrix(yextinct).transpose()
             # run contraction algorithm
-            X, Y = netContract(R, P, b, xactive, yactive, yextinct)
+            X, Y = netContract(R, P, b, xactive, yactive, yextinct, x_seeds)
             x = X[-1]
             y = Y[-1]
 

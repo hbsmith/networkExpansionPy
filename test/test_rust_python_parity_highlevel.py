@@ -634,7 +634,7 @@ class TestPublicAPIDispatch(unittest.TestCase):
         extinct_rxns = sample(all_rxns, len(all_rxns) // 20)
 
         cpds_api, rxns_api = self.kegg.contract(self.seedSet, rxns_scope, cpds_scope, extinct_rxns)
-        cpds_py, rxns_py = self.kegg._contract_python(rxns_scope, cpds_scope, extinct_rxns)
+        cpds_py, rxns_py = self.kegg._contract_python(rxns_scope, cpds_scope, extinct_rxns, self.seedSet)
 
         self.assertEqual(set(cpds_api), set(cpds_py))
         self.assertEqual(set(rxns_api), set(rxns_py))

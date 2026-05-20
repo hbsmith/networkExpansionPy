@@ -7,8 +7,7 @@ import pandas as pd
 
 def rpxb(m, seedSet):
     """Extract R, P, x0, b matrices from a GlobalMetabolicNetwork."""
-    m.rid_to_idx, m.idx_to_rid = m.create_reaction_dicts()
-    m.cid_to_idx, m.idx_to_cid = m.create_compound_dicts()
+    m._ensure_dicts()
     x0 = m.initialize_metabolite_vector(seedSet)
     R, P = m.create_RP_from_irreversible_network()
     b = sum(R)
@@ -116,6 +115,7 @@ def netContract_rs(R, P, x_active, y_active, y_extinct):
         np.asarray(x_active.toarray()).ravel().astype(np.uint8).reshape(1, -1),
         np.asarray(y_active.toarray()).ravel().astype(np.uint8).reshape(1, -1),
         np.asarray(y_extinct.toarray()).ravel().astype(np.uint8).reshape(1, -1),
+        None,
     )
     return x_out[0], y_out[0]
 
@@ -140,6 +140,7 @@ def netContract_batch_rs(R, P, x_active, y_active, y_extinct_batch):
         np.tile(x_1d, (n_batches, 1)),
         np.tile(y_1d, (n_batches, 1)),
         y_extinct_batch.astype(np.uint8),
+        None,
     )
     return x_out, y_out
 
