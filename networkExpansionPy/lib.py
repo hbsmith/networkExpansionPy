@@ -395,6 +395,19 @@ class GlobalMetabolicNetwork:
             self._cid_list = [self.idx_to_cid[i] for i in range(len(self.idx_to_cid))]
         if not hasattr(self, '_rid_list') or self._rid_list is None:
             self._rid_list = [self.idx_to_rid[i] for i in range(len(self.idx_to_rid))]
+        # Object-dtype arrays holding the same (interned) ID objects as the
+        # lists above. Fancy-indexing these with a nonzero-index array and
+        # calling .tolist() copies the existing object references in C, which
+        # is ~3x faster than a Python list comprehension when marshalling
+        # large batches back to ID lists. The np.empty + slice-assign trick
+        # avoids numpy interpreting the (rn, direction) reaction tuples as a
+        # 2D array.
+        if not hasattr(self, '_cid_arr') or self._cid_arr is None:
+            self._cid_arr = np.empty(len(self._cid_list), dtype=object)
+            self._cid_arr[:] = self._cid_list
+        if not hasattr(self, '_rid_arr') or self._rid_arr is None:
+            self._rid_arr = np.empty(len(self._rid_list), dtype=object)
+            self._rid_arr[:] = self._rid_list
         if not hasattr(self, '_cid_set') or self._cid_set is None:
             self._cid_set = set(self.cid_to_idx.keys())
 
@@ -442,6 +455,8 @@ class GlobalMetabolicNetwork:
         self.idx_to_cid = None
         self._cid_list = None
         self._rid_list = None
+        self._cid_arr = None
+        self._rid_arr = None
         self._cid_set = None
 
         global _rust_announced
@@ -453,8 +468,9 @@ class GlobalMetabolicNetwork:
             cidx = np.nonzero(x_arr)[0]
         else:
             cidx = np.nonzero(x_arr.toarray().ravel())[0]
-        cid_list = self._cid_list
-        return [cid_list[i] for i in cidx]
+        # Object-array take + .tolist() copies the interned ID references in C,
+        # far faster than a Python list comprehension for large scopes.
+        return self._cid_arr[cidx].tolist()
 
     def _y_to_reactions(self, y_arr):
         """Convert reaction boolean array to list of reaction IDs."""
@@ -462,8 +478,7 @@ class GlobalMetabolicNetwork:
             ridx = np.nonzero(y_arr)[0]
         else:
             ridx = np.nonzero(y_arr.toarray().ravel())[0]
-        rid_list = self._rid_list
-        return [rid_list[i] for i in ridx]
+        return self._rid_arr[ridx].tolist()
 
     def _iters_to_dict(self, iter_arr, idx_to_id):
         """Convert a Rust iteration vector (int32) to {id: iteration} dict.
@@ -524,9 +539,13 @@ class GlobalMetabolicNetwork:
         initialize_reaction_vector/matrix, then pass uint8 arrays directly.
 
         Args:
-            x_active_batch: (N × n_compounds) uint8 — compound scope per row
-            y_active_batch: (N × n_reactions) uint8 — reaction scope per row
+            x_active_batch: compound scope — either (n_compounds,) uint8 shared
+                across all rows or (N × n_compounds) uint8 per row. Passing a 1D
+                vector lets the Rust kernel broadcast it and avoids tiling.
+            y_active_batch: reaction scope — either (n_reactions,) uint8 shared
+                across all rows or (N × n_reactions) uint8 per row.
             y_extinct_batch: (N × n_reactions) uint8 — 1=extinct, 0=active
+                (determines the batch size N)
             x_seeds: optional (n_compounds,) uint8 — seed compounds preserved
                 each iteration (1D, shared across all batch rows)
 
@@ -1344,40 +1363,72 @@ class GlobalMetabolicNetwork:
                 reactionScope, compoundScope, extinctReactionSets, seedSet
             )
 
-    def _run_contractions_rust(self, reactionScope, compoundScope, extinctReactionSets, seedSet=None):
-        """Rust-accelerated batch contraction.
+    def run_contractions_raw(
+        self, seedSet, reactionScope, compoundScope, extinctReactionSets
+    ):
+        """Batch contraction returning raw uint8 arrays (no ID marshalling).
 
-        x_active and y_active are the same for every batch row (shared scope),
-        so we tile them. y_extinct varies per row.
+        Same inputs and semantics as :meth:`run_contractions`, but returns the
+        raw Rust output arrays instead of converting each row back to lists of
+        ID strings. This skips the dominant cost of ``run_contractions`` for a
+        large batch — building N full ``list[list[str]]`` scopes under the GIL,
+        which does not parallelize — for callers that only need vectorized
+        numpy readouts (e.g. scope sizes, or losses relative to a wildtype
+        scope, which is all the epistasis sweep computes).
+
+        Rust-only: raises if the netexprs backend is unavailable.
+
+        Args:
+            seedSet: Compound IDs preserved during contraction (always
+                available). Pass ``None`` to disable seed preservation.
+            reactionScope: Reaction IDs in scope (shared across all rows).
+            compoundScope: Compound IDs in scope (shared across all rows).
+            extinctReactionSets: List of extinction sets (each a list of
+                reaction IDs to remove). Defines the batch size N.
+
+        Returns:
+            ``(x_batch, y_batch)`` — ``(N × n_compounds)`` and
+            ``(N × n_reactions)`` uint8 arrays. Row ``i`` holds the contracted
+            compound / reaction indicator for ``extinctReactionSets[i]``. Column
+            order matches ``idx_to_cid`` / ``idx_to_rid``; use
+            ``initialize_metabolite_vector`` / ``initialize_reaction_vector`` to
+            map IDs to the same column space (e.g. to diff against a wildtype
+            scope).
         """
+        if not _HAS_RUST:
+            raise RuntimeError(
+                "run_contractions_raw requires the netexprs Rust backend"
+            )
         self._ensure_rust_ready()
-        ra = self._rust_arrays
 
         x_active = self.initialize_metabolite_vector(compoundScope).astype(np.uint8)
         y_active = self.initialize_reaction_vector(reactionScope).astype(np.uint8)
 
-        n_batches = len(extinctReactionSets)
-
-        # Tile shared scope vectors
-        x_active_batch = np.tile(x_active, (n_batches, 1))
-        y_active_batch = np.tile(y_active, (n_batches, 1))
-
-        # Build extinction matrix
-        y_extinct_batch = np.zeros((n_batches, ra["n_reactions"]), dtype=np.uint8)
-        for i, extinctReactions in enumerate(extinctReactionSets):
-            y_extinct_batch[i] = self.initialize_reaction_vector(extinctReactions).astype(np.uint8)
+        # Per-row extinction matrix (single allocation, one Python loop inside).
+        y_extinct_batch = self.initialize_reaction_matrix(extinctReactionSets)
 
         x_seeds = None
         if seedSet is not None:
             x_seeds = self.initialize_metabolite_vector(seedSet).astype(np.uint8)
 
-        x_batch, y_batch = self._call_contract_batch(x_active_batch, y_active_batch, y_extinct_batch, x_seeds)
+        # Shared scope vectors passed 1D; Rust broadcasts across the batch.
+        return self._call_contract_batch(x_active, y_active, y_extinct_batch, x_seeds)
 
-        compoundScopes = []
-        reactionScopes = []
-        for i in range(n_batches):
-            compoundScopes.append(self._x_to_compounds(x_batch[i]))
-            reactionScopes.append(self._y_to_reactions(y_batch[i]))
+    def _run_contractions_rust(self, reactionScope, compoundScope, extinctReactionSets, seedSet=None):
+        """Rust-accelerated batch contraction returning ID-list scopes.
+
+        Thin wrapper over :meth:`run_contractions_raw` that marshals the raw
+        arrays back to per-row ID lists to preserve the ``run_contractions``
+        return type. Callers that only need numpy readouts should use
+        ``run_contractions_raw`` directly to skip this marshalling.
+        """
+        x_batch, y_batch = self.run_contractions_raw(
+            seedSet, reactionScope, compoundScope, extinctReactionSets
+        )
+
+        n_batches = len(extinctReactionSets)
+        compoundScopes = [self._x_to_compounds(x_batch[i]) for i in range(n_batches)]
+        reactionScopes = [self._y_to_reactions(y_batch[i]) for i in range(n_batches)]
 
         return compoundScopes, reactionScopes
 
@@ -1491,10 +1542,10 @@ class GlobalMetabolicNetwork:
         if seedSet is not None:
             x_seeds = self.initialize_metabolite_vector(seedSet).astype(np.uint8)
 
-        # Contraction
+        # Contraction — shared scope vectors passed 1D; Rust broadcasts them.
         x_contracted, y_contracted = self._call_contract_batch(
-            np.tile(x_active, (n_batches, 1)),
-            np.tile(y_active, (n_batches, 1)),
+            x_active,
+            y_active,
             y_extinct_batch,
             x_seeds,
         )
